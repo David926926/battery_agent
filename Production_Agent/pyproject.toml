@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "production-agent-2"
+version = "0.1.0"
+description = "LangGraph-based main-detail poster generation agent for Production_Agent_2.0"
+requires-python = ">=3.11"
+dependencies = [
+  "langgraph>=1.0.0",
+  "pillow>=10.0.0",
+  "pydantic>=2.8.0",
+  "python-dotenv>=1.0.0",
+  "requests>=2.32.0",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

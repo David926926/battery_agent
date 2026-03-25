@@ -1,0 +1,4 @@
+# Streamlit 服务端配置
+# 增大上传限制，支持录屏等大体积视频
+[server]
+maxUploadSize = 500

@@ -1,0 +1,15 @@
+# PDF extraction
+pdfplumber>=0.10.0
+
+# Image processing and text overlay
+Pillow>=10.0.0
+rembg>=2.0.50
+
+# HTTP for image generation API
+requests>=2.28.0
+openai>=1.0.0
+dashscope>=1.14.0
+
+# Config and env
+python-dotenv>=1.0.0
+PyYAML>=6.0

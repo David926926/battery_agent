@@ -1,0 +1,22 @@
+cd "/Users/liyuanheng/Desktop/Battery Agent/Production_Agent_2.0"
+pip install -e .
+
+export DASHSCOPE_API_KEY="your-dashscope-key-here"
+
+PYTHONPATH=src python -m production_agent_2.cli \
+  --primary-copy "南孚电池" \
+  --secondary-copy "买24粒 赠钥匙扣" \
+  --selling-points "聚能环科技" \
+  --variants 5 \
+  --seed 42
+
+
+----------------------------------------------------------------------
+
+cd "/Users/liyuanheng/Desktop/Battery Agent/Production_Agent_2.0"
+export DASHSCOPE_API_KEY="your-dashscope-key-here"
+
+python scripts/qwen_image_edit_cli.py \
+  --image "/Users/liyuanheng/Desktop/Battery Agent/Production_Agent_2.0/runs/20260323T114034Z/outputs/candidate_3_seed_44.png" \
+  --prompt "红色艺术字部分，'连续32年，销量第池'，改成'连续32年，销量第一'；其次，将电池主体右下脚的黄色文字'聚能环科技，连续32年连续销量第一'，改成'聚能环科技'。" \
+  --out "/Users/liyuanheng/Desktop/Battery Agent/Production_Agent_2.0/runs/20260323T114034Z/outputs/candidate_3_seed_44_polished.png"

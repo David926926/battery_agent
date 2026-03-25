@@ -1,0 +1,17 @@
+# 南孚电池内容营销智能体系统 - 依赖清单
+# Python 3.8+ 推荐
+
+# 核心 Web 框架
+streamlit>=1.33.0
+
+# 图表可视化（雷达图等）
+plotly>=5.18.0
+
+# Qwen3 Omni 大模型 API（OpenAI 兼容客户端）
+openai>=1.52.0
+
+# DashScope 文件上传（File 协议模式，突破 10MB 限制）
+dashscope>=1.14.0
+
+# 环境变量加载（可选，用于 .env 中的 DASHSCOPE_API_KEY）
+python-dotenv>=1.0.0

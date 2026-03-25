@@ -1,0 +1,3 @@
+# Community Cloud reads config from repository root (see Streamlit file organization docs).
+[server]
+maxUploadSize = 500

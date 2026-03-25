@@ -1,0 +1,3 @@
+cd "/Users/liyuanheng/Desktop/Battery Agent/interface"
+python3 -m pip install -r requirements.txt
+streamlit run app.py

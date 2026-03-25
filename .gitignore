@@ -1,0 +1,44 @@
+# Secrets — never commit
+.env
+**/.env
+!.env.example
+!**/.env.example
+
+# Python
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*$py.class
+.Python
+.venv/
+venv/
+ENV/
+
+# Local / generated runtime (interface app)
+interface/workspace/
+
+# Labeling Agent local runs
+Labeling Agent/temp/
+Labeling Agent/tagging_results.csv
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Packaging
+*.egg-info/
+dist/
+build/
+
+# Local evaluation runs / history — not for GitHub
+History/
+
+# Internal spreadsheet (not for GitHub)
+人群画像标签.xlsx
+
+# Cursor / IDE
+.cursor/
+**/.cursor/

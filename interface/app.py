@@ -2,11 +2,9 @@ from __future__ import annotations
 
 import base64
 import importlib.util
-import io
 import json
 import os
 import sys
-import zipfile
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -363,15 +361,18 @@ def render_home_selector() -> None:
         unsafe_allow_html=True,
     )
 
-    col1, col2, col3, col4 = st.columns(4)
+    col1, col2, col3 = st.columns(3)
     with col1:
         section_button("评估智能体", "evaluation", "上传单张图片，选择主图商详或媒介投放素材 checklist，展示模型评分与输出。", "nav_eval")
     with col2:
-        section_button("生产智能体", "production", "输入四类参考素材和文案信息，生成主图商详，并支持基于最新结果继续 edit。", "nav_prod")
+        section_button(
+            "生产智能体",
+            "production",
+            "支持图片提取背景和文字生成背景，两种模式二选一，并支持基于最新结果继续 edit。",
+            "nav_prod",
+        )
     with col3:
         section_button("素材库智能体", "labeling", "上传图片后只做标签识别，不包含评分模块。", "nav_label")
-    with col4:
-        section_button("文字图片生成器", "text_generator", "输入 headline，选择模板和字体，生成透明文字图层 PNG、预览图和元数据。", "nav_text")
 
     st.caption(f"当前页面：{active}")
 
@@ -433,61 +434,21 @@ def render_checklist_panel(checklist_cfg: dict[str, Any]) -> None:
     st.markdown("</div>", unsafe_allow_html=True)
 
 
-def build_eval_result_ui(result: dict[str, Any]) -> None:
-    top1, top2, top3 = st.columns(3)
-    with top1:
-        st.markdown(
-            f"""
-            <div class="metric-card">
-                <div class="metric-label">Overall Score</div>
-                <div class="metric-value">{result.get('overall_score', 0):.2f}</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-    with top2:
-        grade = result.get("overall_grade", "")
-        st.markdown(
-            f"""
-            <div class="metric-card">
-                <div class="metric-label">Overall Grade</div>
-                <div class="metric-value" style="font-size:1.55rem;">{grade}</div>
-                <div class="grade-pill {grade_class(grade)}">{grade}</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-    with top3:
-        st.markdown(
-            f"""
-            <div class="metric-card">
-                <div class="metric-label">Checklist Type</div>
-                <div class="metric-value" style="font-size:1.2rem;">{result.get('checklist_type', '')}</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+def build_eval_overall_ui(result: dict[str, Any]) -> None:
+    grade = result.get("overall_grade", "")
+    st.markdown("#### 整体评级")
+    st.markdown(
+        f"""
+        <div class="dim-card">
+            <p class="dim-title">整体评级</p>
+            <div class="grade-pill {grade_class(grade)}">{grade}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
-    left, right = st.columns([1.1, 1])
-    with left:
-        st.markdown("#### 模型输出")
-        st.markdown(
-            f"""
-            <div class="panel">
-                <div class="panel-title">素材摘要</div>
-                <div>{result.get('material_summary', '') or '无'}</div>
-                <div class="panel-title" style="margin-top:1rem;">总体判断</div>
-                <div>{result.get('rationale', '') or '无'}</div>
-                <div class="panel-title" style="margin-top:1rem;">不确定点</div>
-                <div>{result.get('assumptions', '') or '无'}</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-    with right:
-        st.markdown("#### 原始 JSON")
-        st.json(result)
 
+def build_eval_dimensions_ui(result: dict[str, Any]) -> None:
     st.markdown("#### 分维度结果")
     cols = st.columns(2)
     for idx, (dim_name, dim_result) in enumerate(result.get("dimensions", {}).items()):
@@ -497,7 +458,7 @@ def build_eval_result_ui(result: dict[str, Any]) -> None:
                 f"""
                 <div class="dim-card">
                     <p class="dim-title">{dim_name}</p>
-                    <div class="small-muted">Score {dim_result.get('score', 0)} | Severe {dim_result.get('severe_count', 0)} | Minor {dim_result.get('minor_count', 0)}</div>
+                    <div class="small-muted">Severe {dim_result.get('severe_count', 0)} | Minor {dim_result.get('minor_count', 0)}</div>
                     <div class="grade-pill {grade_class(grade)}">{grade}</div>
                 </div>
                 """,
@@ -511,6 +472,74 @@ def build_eval_result_ui(result: dict[str, Any]) -> None:
             st.markdown("Evidence")
             for item in dim_result.get("evidence", []):
                 st.markdown(f"- {item}")
+
+
+def _compact_eval_for_summary(result: dict[str, Any]) -> dict[str, Any]:
+    dims: dict[str, dict[str, Any]] = {}
+    for name, dim in (result.get("dimensions") or {}).items():
+        dims[name] = {
+            "grade": dim.get("grade"),
+            "score": dim.get("score"),
+            "severe_count": dim.get("severe_count"),
+            "minor_count": dim.get("minor_count"),
+            "issue_tags": dim.get("issue_tags") or [],
+            "other_tags": dim.get("other_tags") or [],
+            "evidence": dim.get("evidence") or [],
+        }
+
+    return {
+        "checklist_type": result.get("checklist_type"),
+        "overall_score": result.get("overall_score"),
+        "overall_grade": result.get("overall_grade"),
+        "material_summary": result.get("material_summary") or "",
+        "assumptions": result.get("assumptions") or "",
+        "rationale": result.get("rationale") or "",
+        "dimensions": dims,
+    }
+
+
+def generate_eval_summary(eval_module: Any, result: dict[str, Any]) -> str:
+    api_key = os.getenv("DASHSCOPE_API_KEY", "").strip()
+    if not api_key:
+        raise RuntimeError("DASHSCOPE_API_KEY 未配置，无法生成总结。")
+
+    compact = _compact_eval_for_summary(result)
+
+    base_url = getattr(eval_module, "BASE_URL", None) or "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    model_name = getattr(eval_module, "MODEL_NAME", "qwen3-omni-flash")
+
+    client = OpenAI(api_key=api_key, base_url=base_url)
+
+    system_prompt = (
+        "你是一名电商创意审核专家，请基于 checklist 的结构化评估结果，总结这张素材的主要风险与优劣。"
+        "所有关于“是否存在问题/风险”“是否适合直接投放”的判断，必须严格依据 JSON 中各个评分维度里的等级、分数和列出的具体问题/证据，"
+        "不能把 JSON 中未出现的具体问题当成已发生的事实。"
+        "输出时不要出现具体的维度、“issue_tags”、“other_tags”等技术性术语，也不要直接照搬字段名，而是用自然、口语化但专业的中文来描述。"
+        "整体语气要像给同事写评审意见：简洁、真诚、专业。"
+    )
+
+    user_content = (
+        "下面是对一张电商品牌素材的结构化评估结果(JSON)：\n"
+        f"{json.dumps(compact, ensure_ascii=False, indent=2)}\n\n"
+        "请用 3~6 句自然的中文进行总结，严格遵守以下要求：\n"
+        "1）先用一两句话说明“基于当前 checklist 是否发现明显问题”，以及整体风险感受和是否适合直接投放；\n"
+        "2）如果评分里确实有问题或扣分，只挑 1~3 个最关键的点，用日常说话方式概括出来，并结合 JSON 中已经给出的证据举例，不要发明新的具体问题；\n"
+        "3）如果所有评分都很高且没有列出任何问题，可以说明“基于当前 checklist 暂未看到明显硬伤”，"
+        "但允许在最后补充 1 句话作为额外建议（例如可以在哪些方向上做得更好），并明确这只是建议而不是已经发现的缺陷；\n"
+        "4）除最后这 1 句“额外建议”外，不要自由引入 JSON 中未出现的具体问题点。\n"
+        "不要输出 JSON 或 Markdown，只输出一段连续的自然语言。"
+    )
+
+    completion = client.chat.completions.create(
+        model=model_name,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_content},
+        ],
+    )
+
+    text = completion.choices[0].message.content or ""
+    return text.strip()
 
 
 def run_evaluation(eval_module: Any, uploaded_file: Any, checklist_type: str, content_text: str) -> dict[str, Any]:
@@ -676,19 +705,15 @@ def patched_production_paths(
 def run_generation(
     modules: dict[str, Any],
     grouped_paths: dict[str, list[Path]],
-    primary_copy: str,
-    secondary_copy: str,
-    selling_points: list[str],
-    background_note: str,
-    object_note: str,
-    layout_note: str,
-    text_note: str,
+    generation_mode: str,
+    background_prompt: str,
     variants: int,
-    seed: int,
     size: str,
 ) -> dict[str, Any]:
-    if not any(grouped_paths.values()):
+    if generation_mode == "image_to_background" and not any(grouped_paths.values()):
         raise RuntimeError("至少需要上传一类参考图。")
+    if generation_mode == "text_to_background" and not background_prompt.strip():
+        raise RuntimeError("请输入背景描述。")
 
     workspace_dir = make_run_dir("production_workflow")
     materials_root = workspace_dir / "materials"
@@ -709,23 +734,6 @@ def run_generation(
             target_path = target_dir / path.name
             target_path.write_bytes(path.read_bytes())
 
-    if any(
-        item.strip()
-        for item in [background_note, object_note, layout_note, text_note]
-    ):
-        notes_path = workspace_dir / "upload_notes.txt"
-        notes_path.write_text(
-            "\n".join(
-                [
-                    f"Background: {background_note.strip()}",
-                    f"Object: {object_note.strip()}",
-                    f"Layout: {layout_note.strip()}",
-                    f"Text: {text_note.strip()}",
-                ]
-            ),
-            encoding="utf-8",
-        )
-
     sequential_workflow_cls = modules["SequentialWorkflow"]
     production_nodes = modules["production_nodes"]
     run_request_cls = modules["RunRequest"]
@@ -734,11 +742,9 @@ def run_generation(
 
     request = run_request_cls(
         workflow_type="主图商详",
-        primary_copy=primary_copy,
-        secondary_copy=secondary_copy,
-        selling_points=selling_points or ["聚能环科技"],
+        generation_mode=generation_mode,
         variants=variants,
-        seed=seed,
+        background_prompt=background_prompt.strip(),
         output_size=size,
     )
     state = run_state_cls(run_id=run_id, request=request)
@@ -753,7 +759,6 @@ def run_generation(
                 production_nodes.plan_prompt,
                 production_nodes.generate_background,
                 production_nodes.generate_main_visual,
-                production_nodes.export_component_layers,
                 production_nodes.mark_completed,
             ]
         )
@@ -789,15 +794,25 @@ def run_generation(
     }
 
 
-def run_edit(modules: dict[str, Any], latest_image: str, instruction: str) -> dict[str, str]:
+def run_edit(
+    modules: dict[str, Any],
+    base_image: str,
+    instruction: str,
+    reference_images: list[str] | None = None,
+) -> dict[str, str]:
     edit_client = modules["QwenImageEditClient"]()
     if not edit_client.is_enabled():
         raise RuntimeError("DASHSCOPE_API_KEY 未配置，无法调用编辑模型。")
-    image_path = Path(latest_image)
+    image_path = Path(base_image)
     edit_dir = image_path.parent.parent / "edits"
     edit_dir.mkdir(parents=True, exist_ok=True)
     output_path = edit_dir / f"edit_{datetime.now().strftime('%H%M%S')}.png"
-    return edit_client.retouch(str(image_path), instruction, str(output_path))
+    return edit_client.retouch(
+        str(image_path),
+        instruction,
+        str(output_path),
+        reference_images=reference_images or [],
+    )
 
 
 def save_uploaded_edit_source(uploaded_file: Any, production_result: dict[str, Any]) -> str:
@@ -808,192 +823,11 @@ def save_uploaded_edit_source(uploaded_file: Any, production_result: dict[str, A
     return str(target_path)
 
 
-def get_decomposition_specs() -> list[dict[str, str]]:
-    return [
-        {
-            "key": "background_clean",
-            "filename": "background_clean.png",
-            "label": "干净背景",
-            "mode": "retouch",
-            "instruction": """
-任务：从这张海报中移除所有前景元素，只保留并补全原图背景。
-
-必须删除的内容：
-- 所有人物与身体部位，包括脸、头发、手、衣服、皮肤、影子、倒影
-- 所有产品、包装、电池、彩盒、道具、按钮、标签、logo、文字、数字
-- 所有附着在人物或产品上的局部特效、边缘辉光、贴边闪电、贴边能量环
-
-必须保留的内容：
-- 原图背景本身已有的颜色关系、明暗层次、雾气、烟雾、云层、空间感、远景光感
-- 原图背景已有的整体构图、光源方向、透视关系、氛围感
-
-严格禁止：
-- 禁止保留任何人物、产品、文字、logo 或其轮廓残影
-- 禁止重新生成一个全新的背景
-- 禁止把背景改成摄影棚、舞台、纯渐变、纯空白、几何灯光背景
-- 禁止改变原图背景的主色调、光影方向和整体气质
-
-执行方式：
-- 先彻底删除前景
-- 再只对被前景遮挡的位置做自然补全
-- 补全区域必须和原背景连续、统一、无拼接感
-
-最终输出标准：
-- 结果里只能剩下背景
-- 画面中绝对不能出现任何字、人、产品、物体或可识别的前景痕迹
-- 结果必须看起来像“原图背景被完整恢复”，而不是新做了一张背景
-""".strip(),
-        },
-        {
-            "key": "effects_overlay",
-            "filename": "effects_overlay_black.png",
-            "label": "特效层",
-            "mode": "retouch",
-            "instruction": """
-任务：从这张海报中单独抽离“围绕主体存在的特效层”。
-
-只允许保留这些内容：
-- 电光、闪电、能量环、辉光、发光边缘、光束、雾化发光、能量拖尾
-- 必须是原图里本来就存在、并且围绕主体分布的特效
-
-必须删除的内容：
-- 所有人物、身体、手、脸、头发、衣服
-- 所有产品、电池、彩盒、道具
-- 所有文字、logo、按钮、标签、数字
-- 所有主体本身及其实体轮廓
-
-严格禁止：
-- 禁止保留人物或产品的可识别轮廓
-- 禁止重新生成新的主体、新的手、新的人脸、新的产品
-- 禁止额外设计原图中不存在的大块新特效
-- 禁止输出带场景的背景
-
-输出要求：
-- 最终结果只能剩下特效
-- 背景必须是纯黑色
-- 特效的位置、方向、密度应尽量贴近原图，不要改构图
-- 最终图必须适合在 Photoshop 中直接以 Screen / 滤色模式叠加使用
-""".strip(),
-        },
-    ]
-
-
-def save_uploaded_decomposition_source(uploaded_file: Any, production_result: dict[str, Any]) -> str:
-    base_dir = Path(production_result["workspace_dir"]) / "decomposition_uploads"
-    base_dir.mkdir(parents=True, exist_ok=True)
-    target_path = base_dir / uploaded_file.name
-    target_path.write_bytes(uploaded_file.getvalue())
-    return str(target_path)
-
-
-def run_decomposition(
-    modules: dict[str, Any],
-    production_result: dict[str, Any],
-    source_image_path: str,
-) -> dict[str, Any]:
-    edit_client = modules["QwenImageEditClient"]()
-    if not edit_client.is_enabled():
-        raise RuntimeError("DASHSCOPE_API_KEY 未配置，无法调用拆解模型。")
-
-    source_path = Path(source_image_path)
-    if not source_path.exists():
-        raise RuntimeError("拆解输入图不存在。")
-
-    export_dir = Path(production_result["workspace_dir"]) / "decomposition"
-    export_dir.mkdir(parents=True, exist_ok=True)
-
-    layers: dict[str, dict[str, str]] = {}
-    for spec in get_decomposition_specs():
-        output_path = export_dir / spec["filename"]
-        result = edit_client.retouch(
-            image_path=str(source_path),
-            instruction=spec["instruction"],
-            output_path=str(output_path),
-        )
-        layers[spec["key"]] = {"label": spec["label"], "path": result.get("path", str(output_path))}
-
-    manifest = {
-        "source_image": str(source_path),
-        "generated_at": datetime.now().isoformat(),
-        "layers": layers,
-    }
-    manifest_path = export_dir / "decomposition_manifest.json"
-    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
-    return {
-        "source_image": str(source_path),
-        "layers": layers,
-        "manifest_path": str(manifest_path),
-    }
-
-
-def build_layered_package(production_result: dict[str, Any]) -> tuple[bytes, str]:
-    decomposition = production_result.get("decomposition") or {}
-    manifest = {
-        "run_dir": production_result.get("run_dir", ""),
-        "workspace_dir": production_result.get("workspace_dir", ""),
-        "prompt": production_result.get("prompt", ""),
-        "warnings": production_result.get("warnings", []),
-        "errors": production_result.get("errors", []),
-        "latest_image": production_result.get("latest_image", ""),
-        "package_type": "post_edit_decomposition",
-        "files": [],
-    }
-
-    candidates = [
-        ("final_composite", production_result.get("latest_image")),
-        ("prompt_plan_json", production_result.get("artifacts", {}).get("prompt_plan")),
-        ("decomposition_manifest_json", decomposition.get("manifest_path")),
-    ]
-
-    memory = io.BytesIO()
-    with zipfile.ZipFile(memory, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-        for logical_name, file_path in candidates:
-            if not file_path:
-                continue
-            path = Path(file_path)
-            if not path.exists() or not path.is_file():
-                continue
-            arcname = f"assets/{logical_name}{path.suffix.lower()}" if path.suffix else f"assets/{logical_name}"
-            zf.write(path, arcname)
-            manifest["files"].append(
-                {
-                    "name": logical_name,
-                    "source_path": str(path),
-                    "archive_path": arcname,
-                }
-            )
-
-        for key, item in (decomposition.get("layers") or {}).items():
-            path = Path(item["path"])
-            if path.exists():
-                arcname = f"layers/{path.name}"
-                zf.write(path, arcname)
-                manifest["files"].append(
-                    {
-                        "name": key,
-                        "source_path": str(path),
-                        "archive_path": arcname,
-                    }
-                )
-
-        if production_result.get("boards"):
-            for index, board in enumerate(production_result["boards"], start=1):
-                board_path = Path(board["path"])
-                if board_path.exists():
-                    arcname = f"boards/{index:02d}_{board_path.name}"
-                    zf.write(board_path, arcname)
-                    manifest["files"].append(
-                        {
-                            "name": board["name"],
-                            "source_path": str(board_path),
-                            "archive_path": arcname,
-                        }
-                    )
-
-        zf.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
-
-    filename = f"layered_package_{Path(production_result['run_dir']).name}.zip"
-    return memory.getvalue(), filename
+def save_uploaded_edit_sources(uploaded_files: list[Any], production_result: dict[str, Any]) -> list[str]:
+    saved_paths: list[str] = []
+    for uploaded_file in uploaded_files:
+        saved_paths.append(save_uploaded_edit_source(uploaded_file, production_result))
+    return saved_paths
 
 
 def render_evaluation_page(modules: dict[str, Any]) -> None:
@@ -1014,11 +848,6 @@ def render_evaluation_page(modules: dict[str, Any]) -> None:
             horizontal=True,
         )
         checklist_type = "main_detail" if option == "主图商详" else "media_ad"
-        content_text = st.text_area(
-            "补充说明",
-            placeholder="可选。补充素材背景、投放语境或需要模型重点留意的点。",
-            key="eval_content_text",
-        )
         if uploaded:
             render_image(uploaded.getvalue())
         if st.button("开始评估", type="primary", use_container_width=True, key="eval_submit"):
@@ -1027,7 +856,7 @@ def render_evaluation_page(modules: dict[str, Any]) -> None:
             else:
                 with st.spinner("模型评估中..."):
                     try:
-                        result = run_evaluation(eval_module, uploaded, checklist_type, content_text)
+                        result = run_evaluation(eval_module, uploaded, checklist_type, "")
                         st.session_state["evaluation_result"] = result
                     except Exception as exc:
                         st.session_state["evaluation_error"] = str(exc)
@@ -1039,7 +868,7 @@ def render_evaluation_page(modules: dict[str, Any]) -> None:
         st.error(st.session_state["evaluation_error"])
 
     if st.session_state.get("evaluation_result"):
-        build_eval_result_ui(st.session_state["evaluation_result"])
+        build_eval_overall_ui(st.session_state["evaluation_result"])
         artifact_path = st.session_state["evaluation_result"].get("_artifact_path")
         if artifact_path and Path(artifact_path).exists():
             st.download_button(
@@ -1050,59 +879,89 @@ def render_evaluation_page(modules: dict[str, Any]) -> None:
                 use_container_width=False,
             )
 
+        if "evaluation_summary" not in st.session_state:
+            st.session_state["evaluation_summary"] = ""
+
+        st.markdown("#### 基于 Checklist 的文字总结")
+        if st.button("生成总结段", key="eval_summary_btn", use_container_width=True):
+            with st.spinner("大模型生成总结中..."):
+                try:
+                    summary = generate_eval_summary(eval_module, st.session_state["evaluation_result"])
+                    st.session_state["evaluation_summary"] = summary
+                except Exception as exc:
+                    st.error(f"生成总结失败：{exc}")
+
+        if st.session_state["evaluation_summary"]:
+            st.markdown(st.session_state["evaluation_summary"])
+        else:
+            st.caption("点击上方按钮，让模型基于当前评估结果生成一段文字总结。")
+
+        build_eval_dimensions_ui(st.session_state["evaluation_result"])
+
 
 def render_production_page(modules: dict[str, Any]) -> None:
     st.markdown('<div class="section-head"><h2>生产智能体</h2></div>', unsafe_allow_html=True)
-    st.markdown('<p class="nav-note">当前先支持主图商详。上传四类参考素材，并输入文案，再生成图片；生成后可继续基于最新结果 edit。</p>', unsafe_allow_html=True)
+    st.markdown(
+        '<p class="nav-note">支持两种模式：上传一张成品主图/海报进行<strong>背景提取</strong>，'
+        "或输入一段描述进行<strong>文字生成背景</strong>。两种模式二选一，都会输出一张不含人物、产品、文字和任何 component 的纯背景底图；生成后可继续 edit。</p>",
+        unsafe_allow_html=True,
+    )
 
     left, right = st.columns([1.02, 0.98])
     with left:
-        bg_files = st.file_uploader("Background 参考图", type=["png", "jpg", "jpeg", "webp", "bmp"], accept_multiple_files=True, key="prod_bg")
-        obj_files = st.file_uploader("Object 参考图", type=["png", "jpg", "jpeg", "webp", "bmp"], accept_multiple_files=True, key="prod_obj")
-        layout_files = st.file_uploader("Layout 参考图", type=["png", "jpg", "jpeg", "webp", "bmp"], accept_multiple_files=True, key="prod_layout")
-        text_files = st.file_uploader("Text 参考图", type=["png", "jpg", "jpeg", "webp", "bmp"], accept_multiple_files=True, key="prod_text")
+        generation_mode = st.radio(
+            "背景生成方式",
+            options=["图片提取背景", "文字生成背景"],
+            horizontal=True,
+            key="prod_generation_mode",
+        )
+        is_image_mode = generation_mode == "图片提取背景"
 
-        primary_copy = st.text_input("主标题", value="南孚电池")
-        secondary_copy = st.text_input("副标题", value="持久电力 稳定输出")
-        selling_points_raw = st.text_input("卖点关键词", value="聚能环科技,高效续航")
-        background_note = st.text_area("Background 文字补充", placeholder="例如：空间更开阔、金色逆光、科技感。")
-        object_note = st.text_area("Object 文字补充", placeholder="例如：产品更靠前、包装更清晰、突出电池金属质感。")
-        layout_note = st.text_area("Layout 文字补充", placeholder="例如：主体偏右，左上保留标题区。")
-        text_note = st.text_area("Text 文字补充", placeholder="例如：主标题更大，卖点用短标签。")
+        bg_files = []
+        background_prompt = ""
+        if is_image_mode:
+            bg_files = st.file_uploader(
+                "成品参考图（主图/海报，用于提取背景）",
+                type=["png", "jpg", "jpeg", "webp", "bmp"],
+                accept_multiple_files=True,
+                key="prod_bg",
+            )
+        else:
+            background_prompt = st.text_area(
+                "背景描述",
+                placeholder="例如：高级金色光束穿过薄雾，中心留出干净空间，整体偏暖，带一点电商广告质感，但不要出现任何人物、产品和文字。",
+                height=160,
+                key="prod_background_prompt",
+            )
 
         col_a, col_b, col_c = st.columns(3)
         with col_a:
             variants = st.slider("生成张数", 1, 4, 2)
         with col_b:
-            seed = st.number_input("Seed", min_value=0, value=42, step=1)
+            st.caption("同一输入独立尝试多次" if is_image_mode else "同一段描述独立尝试多次")
         with col_c:
             size = st.selectbox("尺寸", options=["1328*1328", "1024*1024"], index=0)
 
-        if st.button("生成主图商详", type="primary", use_container_width=True, key="prod_generate"):
-            if not any([bg_files, obj_files, layout_files, text_files]):
-                st.error("至少上传一类参考图。")
+        button_label = "提取背景" if is_image_mode else "生成背景"
+        if st.button(button_label, type="primary", use_container_width=True, key="prod_generate"):
+            if is_image_mode and not bg_files:
+                st.error("请至少上传一张成品参考图。")
+            elif not is_image_mode and not background_prompt.strip():
+                st.error("请输入背景描述。")
             else:
-                with st.spinner("生产模型生成中..."):
+                spinner_text = "正在提取背景..." if is_image_mode else "正在生成背景..."
+                with st.spinner(spinner_text):
                     try:
                         run_dir = make_run_dir("production_inputs")
                         grouped_paths = {
                             "background": save_many_uploads(bg_files or [], run_dir / "inputs" / "Background"),
-                            "object": save_many_uploads(obj_files or [], run_dir / "inputs" / "Object"),
-                            "layout": save_many_uploads(layout_files or [], run_dir / "inputs" / "Layout"),
-                            "text": save_many_uploads(text_files or [], run_dir / "inputs" / "Text"),
                         }
                         result = run_generation(
                             modules=modules,
                             grouped_paths=grouped_paths,
-                            primary_copy=primary_copy,
-                            secondary_copy=secondary_copy,
-                            selling_points=[item.strip() for item in selling_points_raw.split(",") if item.strip()],
-                            background_note=background_note,
-                            object_note=object_note,
-                            layout_note=layout_note,
-                            text_note=text_note,
+                            generation_mode="image_to_background" if is_image_mode else "text_to_background",
+                            background_prompt=background_prompt,
                             variants=int(variants),
-                            seed=int(seed),
                             size=size,
                         )
                         st.session_state["production_result"] = result
@@ -1113,28 +972,42 @@ def render_production_page(modules: dict[str, Any]) -> None:
 
     with right:
         st.markdown("#### 输入规范")
-        st.markdown(
-            """
-            <div class="panel">
-                <div class="panel-title">四类输入</div>
-                <div>Background 控制场景与氛围，Object 控制产品主体，Layout 控制版式结构，Text 控制文案层级。</div>
-                <div class="panel-title" style="margin-top:1rem;">当前限制</div>
-                <div>只支持主图商详，并且这里已经切回原 Production_Agent 的生成 workflow；当前默认只做主图生成。后期拆解目前只输出背景和特效两层，并在你手动触发后单独生成，避免拖慢主图生成速度。</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+        if is_image_mode:
+            st.markdown(
+                """
+                <div class="panel">
+                    <div class="panel-title">图片提取背景</div>
+                    <div>上传的图会被当成“待清理海报”，系统直接删除人物、产品、文字、促销条等前景内容，并补全成一张干净背景。</div>
+                    <div class="panel-title" style="margin-top:1rem;">当前限制</div>
+                    <div>当前默认只输出纯背景，不自动生成 component 摆放建议。后续如需 edit，可在页面下方手动触发。</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(
+                """
+                <div class="panel">
+                    <div class="panel-title">文字生成背景</div>
+                    <div>系统会把你输入的文字描述直接当作背景生成需求，调用文生图模型生成纯背景底图。</div>
+                    <div class="panel-title" style="margin-top:1rem;">当前限制</div>
+                    <div>请描述场景、颜色、光感、材质和氛围，但不要把人物、产品、文案或 logo 当作需要出现在画面里的元素。</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
 
     if st.session_state.get("production_error"):
         st.error(st.session_state["production_error"])
 
     result = st.session_state.get("production_result")
     if result:
-        st.markdown("#### 参考板")
-        board_cols = st.columns(max(len(result["boards"]), 1))
-        for idx, board in enumerate(result["boards"]):
-            with board_cols[idx]:
-                render_image(board["path"], caption=board["name"])
+        if result.get("boards"):
+            st.markdown("#### 参考拼板（由上传图生成，供模型看图）")
+            board_cols = st.columns(max(len(result["boards"]), 1))
+            for idx, board in enumerate(result["boards"]):
+                with board_cols[idx]:
+                    render_image(board["path"], caption=board["name"])
 
         st.markdown("#### 生成结果")
         image_cols = st.columns(min(len(result["outputs"]), 3))
@@ -1153,104 +1026,64 @@ def render_production_page(modules: dict[str, Any]) -> None:
         st.markdown("#### 生成 Prompt")
         st.code(result["prompt"], language="text")
 
-        st.markdown("#### 后期拆解")
-        decompose_source_mode = st.radio(
-            "拆解输入源",
-            options=["拆解最新生成图", "上传一张图片后拆解"],
-            horizontal=True,
-            key="prod_decompose_source_mode",
-        )
-        decomposition_target_path = result["latest_image"]
-        uploaded_decompose_image = None
-        if decompose_source_mode == "上传一张图片后拆解":
-            uploaded_decompose_image = st.file_uploader(
-                "上传需要拆解的图片",
-                type=["png", "jpg", "jpeg", "webp", "bmp"],
-                key="prod_decompose_upload",
-            )
-            if uploaded_decompose_image:
-                render_image(uploaded_decompose_image.getvalue(), caption="待拆解上传图")
-                decomposition_target_path = save_uploaded_decomposition_source(uploaded_decompose_image, result)
-            else:
-                st.caption("上传一张图片后，拆解将基于该图片执行。")
-        else:
-            st.caption("当前默认基于最新生成结果拆解背景和特效两层。")
-
-        if st.button("拆解最终图", use_container_width=False, key="prod_decompose_submit"):
-            if decompose_source_mode == "上传一张图片后拆解" and not uploaded_decompose_image:
-                st.error("请先上传一张需要拆解的图片。")
-            else:
-                with st.spinner("正在基于目标图拆解后期图层..."):
-                    try:
-                        decomposition = run_decomposition(modules, result, decomposition_target_path)
-                        result["decomposition"] = decomposition
-                        st.session_state["production_result"] = result
-                        st.session_state.pop("production_error", None)
-                    except Exception as exc:
-                        st.session_state["production_error"] = str(exc)
-
-        decomposition = result.get("decomposition")
-        if decomposition:
-            layer_cols = st.columns(2)
-            for idx, (key, item) in enumerate(decomposition.get("layers", {}).items()):
-                with layer_cols[idx % 2]:
-                    st.markdown(f"**{item['label']}**")
-                    render_image(item["path"])
-            package_bytes, package_name = build_layered_package(result)
-            st.download_button(
-                "下载后期拆解包",
-                package_bytes,
-                file_name=package_name,
-                mime="application/zip",
-                key="download_layered_package",
-                use_container_width=False,
-            )
-
         st.markdown("#### Edit 模式")
-        edit_source_mode = st.radio(
-            "编辑输入源",
-            options=["继续 edit 最新结果", "上传一张图片后 edit"],
+        output_options = {
+            f"候选 {idx + 1}": output["path"] for idx, output in enumerate(result.get("outputs", []))
+        }
+        if not output_options and result.get("latest_image"):
+            output_options = {"当前最新结果": result["latest_image"]}
+
+        base_label = st.radio(
+            "选择一张背景图作为 Base",
+            options=list(output_options.keys()),
             horizontal=True,
-            key="prod_edit_source_mode",
+            key="prod_edit_base_image",
         )
-        uploaded_edit_image = None
-        edit_target_path = result["latest_image"]
-        if edit_source_mode == "上传一张图片后 edit":
-            uploaded_edit_image = st.file_uploader(
-                "上传需要 edit 的图片",
-                type=["png", "jpg", "jpeg", "webp", "bmp"],
-                key="prod_edit_upload",
-            )
-            if uploaded_edit_image:
-                render_image(uploaded_edit_image.getvalue(), caption="待编辑上传图")
-                edit_target_path = save_uploaded_edit_source(uploaded_edit_image, result)
-            else:
-                st.caption("上传一张图片后，edit 将基于该图片执行。")
+        edit_target_path = output_options[base_label]
+        render_image(edit_target_path, caption=f"Base 背景图：{base_label}")
+
+        uploaded_edit_images = st.file_uploader(
+            "可选：上传一张或多张素材图作为参考",
+            type=["png", "jpg", "jpeg", "webp", "bmp"],
+            accept_multiple_files=True,
+            key="prod_edit_upload",
+        )
+        reference_image_paths: list[str] = []
+        if uploaded_edit_images:
+            preview_cols = st.columns(min(len(uploaded_edit_images), 3))
+            for idx, uploaded_file in enumerate(uploaded_edit_images):
+                with preview_cols[idx % len(preview_cols)]:
+                    render_image(uploaded_file.getvalue(), caption=f"参考素材图 {idx + 1}")
+            reference_image_paths = save_uploaded_edit_sources(uploaded_edit_images, result)
+            st.caption(f"模型会基于所选背景图进行编辑，并把这 {len(reference_image_paths)} 张素材图作为参考输入。")
         else:
-            st.caption("当前默认基于最新生成结果继续 edit。")
+            st.caption("如果不上传素材图，模型只会基于你选中的背景图和文字指令进行编辑。")
 
         edit_prompt = st.text_area(
             "编辑指令",
-            placeholder="例如：让背景更高级一些，保留产品和文字不变；强化左上角卖点区层级。",
+            placeholder="例如：把上传的电池体放在画面中间，大小占画面高度约 40%，加自然投影，整体保持电商广告质感。",
             key="prod_edit_prompt",
         )
-        if st.button("对最新图片执行 Edit", use_container_width=True, key="prod_edit_submit"):
+        if st.button("基于所选背景图执行 Edit", use_container_width=True, key="prod_edit_submit"):
             if not edit_prompt.strip():
                 st.error("请输入 edit 指令。")
-            elif edit_source_mode == "上传一张图片后 edit" and not uploaded_edit_image:
-                st.error("请先上传一张需要 edit 的图片。")
             else:
                 with st.spinner("编辑模型处理中..."):
                     try:
-                        edit_result = run_edit(modules, edit_target_path, edit_prompt.strip())
+                        edit_result = run_edit(
+                            modules,
+                            edit_target_path,
+                            edit_prompt.strip(),
+                            reference_images=reference_image_paths,
+                        )
                         result["latest_image"] = edit_result["path"]
-                        result.pop("decomposition", None)
                         result.setdefault("edit_history", []).append(
                             {
                                 "prompt": edit_prompt.strip(),
                                 "path": edit_result["path"],
-                                "source_mode": edit_source_mode,
-                                "source_path": edit_target_path,
+                                "base_image_label": base_label,
+                                "base_image_path": edit_target_path,
+                                "reference_image_paths": reference_image_paths,
                             }
                         )
                         st.session_state["production_result"] = result
@@ -1260,12 +1093,25 @@ def render_production_page(modules: dict[str, Any]) -> None:
 
         st.markdown("#### 当前最新结果")
         render_image(result["latest_image"])
+        st.download_button(
+            "下载图片",
+            Path(result["latest_image"]).read_bytes(),
+            file_name=Path(result["latest_image"]).name,
+            mime="image/png",
+            key="download_latest_image",
+            use_container_width=False,
+        )
         if result.get("edit_history"):
             st.markdown("#### Edit 历史")
             for idx, item in enumerate(result["edit_history"], start=1):
                 st.markdown(f"{idx}. {item['prompt']}")
-                st.caption(f"来源：{item.get('source_mode', '继续 edit 最新结果')}")
+                st.caption(f"Base：{item.get('base_image_label', '当前最新结果')}")
+                if item.get("reference_image_paths"):
+                    st.caption(f"附加参考素材：{len(item.get('reference_image_paths', []))} 张")
                 render_image(item["path"])
+
+        with st.expander("可选：文字图片生成器", expanded=False):
+            render_text_generator_page(modules, embedded=True)
 
 
 def render_labeling_page(modules: dict[str, Any]) -> None:
@@ -1418,10 +1264,14 @@ def run_text_generator(
     }
 
 
-def render_text_generator_page(modules: dict[str, Any]) -> None:
+def render_text_generator_page(modules: dict[str, Any], embedded: bool = False) -> None:
     text_module = modules["text"]
-    st.markdown('<div class="section-head"><h2>文字图片生成器</h2></div>', unsafe_allow_html=True)
-    st.markdown('<p class="nav-note">输入主标题文案，选择字体模板或上传自定义 TTF/OTF，生成透明文字图层和预览图。</p>', unsafe_allow_html=True)
+    if embedded:
+        st.markdown("#### 文字图片生成器")
+        st.caption("可选小功能：输入 headline，生成透明文字图层 PNG、预览图和元数据。")
+    else:
+        st.markdown('<div class="section-head"><h2>文字图片生成器</h2></div>', unsafe_allow_html=True)
+        st.markdown('<p class="nav-note">输入主标题文案，选择字体模板或上传自定义 TTF/OTF，生成透明文字图层和预览图。</p>', unsafe_allow_html=True)
 
     left, right = st.columns([0.95, 1.05])
     with left:
@@ -1568,8 +1418,6 @@ def main() -> None:
         render_evaluation_page(modules)
     elif active == "production":
         render_production_page(modules)
-    elif active == "text_generator":
-        render_text_generator_page(modules)
     else:
         render_labeling_page(modules)
 

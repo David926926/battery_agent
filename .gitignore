@@ -35,6 +35,9 @@ build/
 
 # Local evaluation runs / history — not for GitHub
 History/
+Sample/
+Production_Agent/sources/
+Text_Script/
 
 # Internal spreadsheet (not for GitHub)
 人群画像标签.xlsx

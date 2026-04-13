@@ -24,10 +24,12 @@ def create_reference_board(
     assets: list[MaterialAsset],
     output_path: Path,
     note: str,
+    *,
+    with_captions: bool = True,
 ) -> ReferenceBoard:
     tile_w = 720
     tile_h = 720
-    caption_h = 44
+    caption_h = 44 if with_captions else 0
     cols = 2 if len(assets) > 1 else 1
     rows = ceil(len(assets) / cols) or 1
     board = Image.new("RGB", (cols * tile_w, rows * (tile_h + caption_h)), (255, 255, 255))
@@ -42,8 +44,9 @@ def create_reference_board(
         with Image.open(asset.path) as image:
             tile = _fit_image(image, (tile_w, tile_h))
         board.paste(tile.convert("RGB"), (x, y))
-        draw.rectangle((x, y + tile_h, x + tile_w, y + tile_h + caption_h), fill=(248, 214, 66))
-        draw.text((x + 12, y + tile_h + 14), asset.filename, fill=(20, 20, 20), font=font)
+        if with_captions:
+            draw.rectangle((x, y + tile_h, x + tile_w, y + tile_h + caption_h), fill=(248, 214, 66))
+            draw.text((x + 12, y + tile_h + 14), asset.filename, fill=(20, 20, 20), font=font)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     board.save(output_path, format="PNG")

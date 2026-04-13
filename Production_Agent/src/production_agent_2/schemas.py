@@ -6,22 +6,19 @@ from pydantic import BaseModel, Field
 
 
 Category = Literal["background", "layout", "object", "text"]
+GenerationMode = Literal["image_to_background", "text_to_background"]
 
 
 class RunRequest(BaseModel):
     workflow_type: str = "主图商详"
+    generation_mode: GenerationMode = "image_to_background"
     brand: str = "南孚"
     audience: str = "电商消费者"
     platform: str = "电商平台"
     aspect_ratio: str = "1:1"
     output_size: str = "1328*1328"
     variants: int = 5
-    seed: int = 42
-    primary_copy: str = "南孚电池"
-    secondary_copy: str = "持久电力 稳定输出"
-    selling_points: list[str] = Field(
-        default_factory=lambda: ["聚能环科技"]
-    )
+    background_prompt: str = ""
     dry_run: bool = False
 
 
@@ -59,7 +56,6 @@ class PromptPlan(BaseModel):
     reference_board_paths: list[str] = Field(default_factory=list)
     size: str
     variants: int
-    base_seed: int
 
 
 class GeneratedImage(BaseModel):

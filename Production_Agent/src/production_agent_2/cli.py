@@ -9,11 +9,7 @@ from production_agent_2.tools.io import utc_timestamp
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run Production_Agent_2.0")
-    parser.add_argument("--primary-copy", default="南孚电池")
-    parser.add_argument("--secondary-copy", default="持久电力 稳定输出")
-    parser.add_argument("--selling-points", default="聚能环科技")
     parser.add_argument("--variants", type=int, default=5)
-    parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--size", default="1328*1328")
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
@@ -21,15 +17,10 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    selling_points = [item.strip() for item in args.selling_points.split(",") if item.strip()]
     state = RunState(
         run_id=utc_timestamp(),
         request=RunRequest(
-            primary_copy=args.primary_copy,
-            secondary_copy=args.secondary_copy,
-            selling_points=selling_points,
             variants=args.variants,
-            seed=args.seed,
             output_size=args.size,
             dry_run=args.dry_run,
         ),

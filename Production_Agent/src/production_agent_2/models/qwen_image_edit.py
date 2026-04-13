@@ -16,10 +16,22 @@ class QwenImageEditClient:
     def is_enabled(self) -> bool:
         return DashScopeClient().enabled
 
-    def retouch(self, image_path: str, instruction: str, output_path: str) -> dict[str, str]:
+    def retouch(
+        self,
+        image_path: str,
+        instruction: str,
+        output_path: str,
+        negative_prompt: str | None = None,
+        reference_images: list[str] | None = None,
+    ) -> dict[str, str]:
         client = DashScopeClient()
         if not client.enabled:
             return {"mode": "offline_stub", "model": self.model_name, "path": image_path}
+
+        content = [{"image": encode_image_as_data_url(image_path)}]
+        for ref_path in reference_images or []:
+            content.append({"image": encode_image_as_data_url(ref_path)})
+        content.append({"text": instruction})
 
         payload = {
             "model": self.model_name,
@@ -27,19 +39,19 @@ class QwenImageEditClient:
                 "messages": [
                     {
                         "role": "user",
-                        "content": [
-                            {"image": encode_image_as_data_url(image_path)},
-                            {"text": instruction},
-                        ],
+                        "content": content,
                     }
                 ]
             },
             "parameters": {
                 "watermark": False,
                 "n": 1,
-                "negative_prompt": (
-                    "replace product, change packaging, rewrite text, unreadable text, blur, duplicate objects, "
-                    "broken battery, wrong brand, wrong layout, extra props, collage look"
+                "negative_prompt": negative_prompt
+                or (
+                    "text, logo, product, battery, human, face, hand, body, packaging, chinese characters, letters, "
+                    "numbers, symbols, watermark, button, label, signage, unreadable text, garbled text, promo banner, "
+                    "badge, extra props, object outline, subject silhouette, foreground residue, duplicate object, "
+                    "collage board, low quality"
                 ),
             },
         }

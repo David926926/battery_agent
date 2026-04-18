@@ -1,0 +1,64 @@
+{
+  "task_type": "background_generation",
+  "generation_mode": "image_to_background",
+  "use_case": "main_detail",
+  "workflow_type": "主图商详",
+  "audience": "电商消费者",
+  "scene": "基于参考图提取背景",
+  "style": "",
+  "must_have": [
+    "预留干净可用的组件摆放空间",
+    "无文字",
+    "无Logo",
+    "无产品主体"
+  ],
+  "must_avoid": [
+    "文字",
+    "Logo",
+    "产品主体",
+    "包装",
+    "水印",
+    "伪产品",
+    "竞品元素",
+    "过强科技感",
+    "卡通化"
+  ],
+  "selling_points": [],
+  "reserve_component_space": true,
+  "realism_level": "realistic",
+  "brand_tone_priority": [
+    "reliable",
+    "warm",
+    "professional"
+  ],
+  "brand_tone": "可靠、温暖、专业",
+  "visual_density": "medium",
+  "aspect_ratio": "1:1",
+  "output_size": "1328*1328",
+  "direction_count": 1,
+  "variants_per_direction": 6,
+  "source_summary": "用户上传了 0 张成品参考图，目标是清除前景后得到可继续设计的纯背景。",
+  "prompt_context": "",
+  "hard_constraints": [
+    "必须清除原海报中的人物、产品、促销条、按钮、角标和残影。",
+    "只生成背景，不出现文字、Logo、品牌标识、水印或伪产品。",
+    "不出现电池主体、包装、竞品元素或任何可单独识别的商品主体。",
+    "画面必须可用于后续设计，保留自然空间和清晰层次。"
+  ],
+  "quality_constraints": [
+    "保持高分辨率和完整空间透视。",
+    "视觉密度控制为 medium，中景不过度拥挤。",
+    "真实感程度为 高级写实。"
+  ],
+  "negative_constraints": [
+    "文字",
+    "Logo",
+    "产品主体",
+    "包装",
+    "水印",
+    "伪产品",
+    "竞品元素",
+    "过强科技感",
+    "卡通化"
+  ]
+}

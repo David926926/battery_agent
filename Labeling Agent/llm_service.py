@@ -8,9 +8,17 @@ import os
 import base64
 import json
 import re
+import sys
+from pathlib import Path
 from typing import Optional
 
 from openai import OpenAI
+
+PRODUCTION_SRC = Path(__file__).resolve().parents[1] / "Production_Agent" / "src"
+if str(PRODUCTION_SRC) not in sys.path:
+    sys.path.insert(0, str(PRODUCTION_SRC))
+
+from production_agent_2.models.model_routing import get_default_model, run_with_model_fallback
 
 
 # System Prompt：新版南孚全域标签定义字典 + 85% 置信度阈值
@@ -278,31 +286,39 @@ def _parse_evaluation_response(text: str) -> Optional[dict]:
     return result
 
 
-def _call_model_for_evaluation(content: list, image_type: str) -> Optional[dict]:
+def _call_model_for_evaluation(content: list, image_type: str, preferred_model: str | None = None) -> Optional[dict]:
     """调用模型进行图片素材评价，返回解析后的评价结果。content 最后一项须为评价用文本。"""
     client = _get_client()
-    completion = client.chat.completions.create(
-        model="qwen3-omni-flash",
-        messages=[
-            {"role": "system", "content": EVALUATION_SYSTEM_PROMPT.strip()},
-            {"role": "user", "content": content},
-        ],
-        temperature=0.01,
-        top_p=0.01,
-        seed=42,
-        modalities=["text"],
-        stream=True,
-        stream_options={"include_usage": True},
+    completion, resolved_model, attempts = run_with_model_fallback(
+        family="vision_chat",
+        preferred_model=preferred_model or get_default_model("vision_chat"),
+        call=lambda model_name: client.chat.completions.create(
+            model=model_name,
+            messages=[
+                {"role": "system", "content": EVALUATION_SYSTEM_PROMPT.strip()},
+                {"role": "user", "content": content},
+            ],
+            temperature=0.01,
+            top_p=0.01,
+            seed=42,
+            modalities=["text"],
+            stream=True,
+            stream_options={"include_usage": True},
+        ),
     )
     full_text = ""
     for chunk in completion:
         if chunk.choices and chunk.choices[0].delta.content:
             full_text += chunk.choices[0].delta.content or ""
-    return _parse_evaluation_response(full_text)
+    parsed = _parse_evaluation_response(full_text)
+    if parsed is not None:
+        parsed["_resolved_model"] = resolved_model
+        parsed["_attempted_models"] = attempts
+    return parsed
 
 
 def analyze_media_for_score(
-    file_bytes: bytes, filename: str, is_image: bool, image_type: str
+    file_bytes: bytes, filename: str, is_image: bool, image_type: str, preferred_model: str | None = None
 ) -> Optional[dict]:
     """对图片进行素材评价（Base64 模式）。仅图片时调用；视频可返回 None 或 mock。"""
     if not is_image:
@@ -310,16 +326,21 @@ def analyze_media_for_score(
     content = _build_content(file_bytes, filename, is_image)
     # 替换为评价用 prompt
     content[-1] = {"type": "text", "text": _build_evaluation_user_prompt(image_type)}
-    return _call_model_for_evaluation(content, image_type)
+    return _call_model_for_evaluation(content, image_type, preferred_model=preferred_model)
 
 
-def analyze_media_for_score_by_url(file_url: str, is_image: bool, image_type: str) -> Optional[dict]:
+def analyze_media_for_score_by_url(
+    file_url: str,
+    is_image: bool,
+    image_type: str,
+    preferred_model: str | None = None,
+) -> Optional[dict]:
     """对图片进行素材评价（URL 模式）。仅图片时调用。"""
     if not is_image:
         return None
     content = _build_content_from_url(file_url, is_image)
     content[-1] = {"type": "text", "text": _build_evaluation_user_prompt(image_type)}
-    return _call_model_for_evaluation(content, image_type)
+    return _call_model_for_evaluation(content, image_type, preferred_model=preferred_model)
 
 
 def _get_client() -> OpenAI:
@@ -430,21 +451,25 @@ def _parse_tagging_response(text: str) -> Optional[dict]:
     return result if any(result.values()) else None
 
 
-def _call_model(content: list) -> Optional[dict]:
+def _call_model(content: list, preferred_model: str | None = None) -> Optional[dict]:
     """调用模型并解析结果"""
     client = _get_client()
-    completion = client.chat.completions.create(
-        model="qwen3-omni-flash",
-        messages=[
-            {"role": "system", "content": DEFINITIONAL_PROMPT.strip()},
-            {"role": "user", "content": content},
-        ],
-        temperature=0.01,
-        top_p=0.01,
-        seed=42,
-        modalities=["text"],
-        stream=True,
-        stream_options={"include_usage": True},
+    completion, resolved_model, attempts = run_with_model_fallback(
+        family="vision_chat",
+        preferred_model=preferred_model or get_default_model("vision_chat"),
+        call=lambda model_name: client.chat.completions.create(
+            model=model_name,
+            messages=[
+                {"role": "system", "content": DEFINITIONAL_PROMPT.strip()},
+                {"role": "user", "content": content},
+            ],
+            temperature=0.01,
+            top_p=0.01,
+            seed=42,
+            modalities=["text"],
+            stream=True,
+            stream_options={"include_usage": True},
+        ),
     )
 
     full_text = ""
@@ -452,24 +477,37 @@ def _call_model(content: list) -> Optional[dict]:
         if chunk.choices and chunk.choices[0].delta.content:
             full_text += chunk.choices[0].delta.content or ""
 
-    return _parse_tagging_response(full_text)
+    parsed = _parse_tagging_response(full_text)
+    if parsed is not None:
+        parsed["_resolved_model"] = resolved_model
+        parsed["_attempted_models"] = attempts
+    return parsed
 
 
-def analyze_media_for_tags(file_bytes: bytes, filename: str, is_image: bool) -> Optional[dict]:
+def analyze_media_for_tags(
+    file_bytes: bytes,
+    filename: str,
+    is_image: bool,
+    preferred_model: str | None = None,
+) -> Optional[dict]:
     """
-    Base64 模式：适用于小文件（< 10MB）
+    Base64 模式：适用于较小文件
     """
     max_mb = 10
     if len(file_bytes) > max_mb * 1024 * 1024:
-        raise ValueError(f"文件过大，Base64 模式最大 {max_mb}MB，请使用 File 协议模式")
+        raise ValueError("文件过大，Base64 模式不适用，请使用 File 协议模式")
     content = _build_content(file_bytes, filename, is_image)
-    return _call_model(content)
+    return _call_model(content, preferred_model=preferred_model)
 
 
-def analyze_media_for_tags_by_url(file_url: str, is_image: bool) -> Optional[dict]:
+def analyze_media_for_tags_by_url(
+    file_url: str,
+    is_image: bool,
+    preferred_model: str | None = None,
+) -> Optional[dict]:
     """
-    File URL 模式：适用于大文件，突破 10MB 限制
+    File URL 模式：适用于较大文件
     file_url: DashScope 上传后返回的 URL（file:// 或 oss:// 或 https://）
     """
     content = _build_content_from_url(file_url, is_image)
-    return _call_model(content)
+    return _call_model(content, preferred_model=preferred_model)

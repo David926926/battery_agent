@@ -1,0 +1,227 @@
+{
+  "main_detail": {
+    "title": "电商渠道 主图&商详 Checklist",
+    "dimensions": {
+      "Background": {
+        "issue_tags": [
+          "场景无关",
+          "背景杂乱或噪点过多",
+          "明显的“AI生成”痕迹",
+          "人物或物体部位缺失/断裂",
+          "明显拼贴或合成痕迹"
+        ],
+        "severe": [
+          "场景无关",
+          "明显的“AI生成”痕迹",
+          "人物或物体部位缺失/断裂",
+          "明显拼贴或合成痕迹"
+        ],
+        "minor": [
+          "背景杂乱或噪点过多"
+        ],
+        "rules": {
+          "risky": "severe>=1 OR minor>=3",
+          "acceptable": "severe==0 AND minor in [1,2]",
+          "excellent": "severe==0 AND minor==0"
+        }
+      },
+      "Object": {
+        "issue_tags": [
+          "产品包装文字模糊或不可读",
+          "物体轮廓不完整（缺失或被裁切）",
+          "多余或重复部件（轮廓异常延展）",
+          "物体摆放或姿态不符合物理逻辑",
+          "光影或透视与场景不一致",
+          "比例或尺度不合理",
+          "未展示产品实物细节（增强确定性）"
+        ],
+        "severe": [
+          "产品包装文字模糊或不可读",
+          "物体轮廓不完整（缺失或被裁切）",
+          "多余或重复部件（轮廓异常延展）",
+          "物体摆放或姿态不符合物理逻辑",
+          "比例或尺度不合理"
+        ],
+        "minor": [
+          "光影或透视与场景不一致",
+          "未展示产品实物细节（增强确定性）"
+        ],
+        "rules": {
+          "risky": "severe>=1 OR minor>=2",
+          "acceptable": "severe==0 AND minor==1",
+          "excellent": "severe==0 AND minor==0"
+        }
+      },
+      "Text": {
+        "issue_tags": [
+          "行距或断行不合理",
+          "风格与品牌或海报调性不符",
+          "笔画渲染错误",
+          "拼写错误或错别字",
+          "缺少应出现的覆盖文字",
+          "字体过小",
+          "文字相互重叠（或与主体重叠）"
+        ],
+        "severe": [
+          "笔画渲染错误",
+          "拼写错误或错别字",
+          "缺少应出现的覆盖文字",
+          "字体过小",
+          "文字相互重叠（或与主体重叠）"
+        ],
+        "minor": [
+          "行距或断行不合理",
+          "风格与品牌或海报调性不符"
+        ],
+        "rules": {
+          "risky": "severe>=1 OR minor>=3",
+          "acceptable": "severe==0 AND minor in [1,2]",
+          "excellent": "severe==0 AND minor==0"
+        }
+      },
+      "Layout": {
+        "issue_tags": [
+          "画面过于拥挤或杂乱",
+          "留白过多",
+          "构图视觉不平衡",
+          "重要元素被遮挡或互相遮挡",
+          "信息层级不清晰"
+        ],
+        "severe": [
+          "重要元素被遮挡或互相遮挡"
+        ],
+        "minor": [
+          "画面过于拥挤或杂乱",
+          "留白过多",
+          "构图视觉不平衡",
+          "信息层级不清晰"
+        ],
+        "rules": {
+          "risky": "severe>=1 OR minor>=2",
+          "acceptable": "severe==0 AND minor==1",
+          "excellent": "severe==0 AND minor==0"
+        }
+      }
+    },
+    "overall_rule": {
+      "score_formula": "(B+O+T+L)/4",
+      "grade": {
+        "excellent": "overall_score>=1.5 AND no_dim_risky",
+        "acceptable": "0.75<=overall_score<1.5 AND risky_dims<=1",
+        "risky": "overall_score<0.75 OR risky_dims>=2"
+      }
+    }
+  },
+  "media_ad": {
+    "title": "电商渠道 媒介投放素材 Checklist",
+    "dimensions": {
+      "Background": {
+        "issue_tags": [
+          "场景或语境较弱",
+          "场景无关",
+          "背景杂乱或噪点过多",
+          "明显的“AI生成”痕迹",
+          "人物或物体部位缺失/断裂",
+          "明显拼贴或合成痕迹",
+          "场景创新度不够"
+        ],
+        "severe": [
+          "场景无关",
+          "明显的“AI生成”痕迹",
+          "人物或物体部位缺失/断裂",
+          "明显拼贴或合成痕迹"
+        ],
+        "minor": [
+          "场景或语境较弱",
+          "背景杂乱或噪点过多",
+          "场景创新度不够"
+        ],
+        "rules": {
+          "risky": "severe>=1 OR minor>=3",
+          "acceptable": "severe==0 AND minor in [1,2]",
+          "excellent": "severe==0 AND minor==0"
+        }
+      },
+      "Object": {
+        "issue_tags": [
+          "产品包装文字模糊或不可读",
+          "物体轮廓不完整（缺失或被裁切）",
+          "多余或重复部件（轮廓异常延展）",
+          "物体摆放或姿态不符合物理逻辑",
+          "光影或透视与场景不一致",
+          "比例或尺度不合理",
+          "明显合成痕迹",
+          "产品未形成视觉焦点",
+          "用户难以理解该设备为何会使用本产品（如燃气表）"
+        ],
+        "severe": [
+          "产品包装文字模糊或不可读",
+          "物体轮廓不完整（缺失或被裁切）",
+          "多余或重复部件（轮廓异常延展）",
+          "物体摆放或姿态不符合物理逻辑",
+          "比例或尺度不合理",
+          "用户难以理解该设备为何会使用本产品（如燃气表）"
+        ],
+        "minor": [
+          "光影或透视与场景不一致",
+          "明显合成痕迹",
+          "产品未形成视觉焦点"
+        ],
+        "rules": {
+          "risky": "severe>=1 OR minor>=2",
+          "acceptable": "severe==0 AND minor==1",
+          "excellent": "severe==0 AND minor==0"
+        }
+      },
+      "Text": {
+        "issue_tags": [
+          "拼写错误或错别字",
+          "缺少应出现的覆盖文字",
+          "字体过小",
+          "文字相互重叠（或与主体重叠）"
+        ],
+        "severe": [
+          "拼写错误或错别字",
+          "缺少应出现的覆盖文字",
+          "字体过小",
+          "文字相互重叠（或与主体重叠）"
+        ],
+        "minor": [],
+        "rules": {
+          "risky": "severe>=1 OR minor>=3",
+          "acceptable": "severe==0 AND minor in [1,2]",
+          "excellent": "severe==0 AND minor==0"
+        }
+      },
+      "Layout": {
+        "issue_tags": [
+          "画面过于拥挤或杂乱",
+          "留白过多",
+          "构图视觉不平衡",
+          "重要元素被遮挡或互相遮挡"
+        ],
+        "severe": [
+          "重要元素被遮挡或互相遮挡"
+        ],
+        "minor": [
+          "画面过于拥挤或杂乱",
+          "留白过多",
+          "构图视觉不平衡"
+        ],
+        "rules": {
+          "risky": "severe>=1 OR minor>=2",
+          "acceptable": "severe==0 AND minor==1",
+          "excellent": "severe==0 AND minor==0"
+        }
+      }
+    },
+    "overall_rule": {
+      "score_formula": "(B+O+T+L)/4",
+      "grade": {
+        "excellent": "overall_score>=1.5 AND no_dim_risky",
+        "acceptable": "0.75<=overall_score<1.5 AND risky_dims<=1",
+        "risky": "overall_score<0.75 OR risky_dims>=2"
+      }
+    }
+  }
+}

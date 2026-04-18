@@ -2,7 +2,7 @@
 南孚高精度视觉审计系统
 ======================
 置信度阈值 > 85%，零随机性，宁缺毋滥
-支持 DashScope File 协议模式，突破 10MB 上传限制
+支持 DashScope File 协议模式，处理较大的上传文件
 """
 
 import os
@@ -18,7 +18,7 @@ try:
 except ImportError:
     pass
 
-# DashScope File 协议上传（大文件）
+# DashScope File 协议上传（较大文件）
 # 兼容多种 dashscope 版本 API：File.upload / File.call_upload / FileUploader
 _dashscope_file_error = None
 
@@ -331,7 +331,7 @@ def _save_and_upload(uploaded_file):
         #    （视觉 API 仅接受 https:// 或 data:base64，不接受 file://file-id）
         #    因此不再尝试，直接提示安装 dashscope
         raise RuntimeError(
-            "大文件（>10MB）需上传到云端。请安装 dashscope 以支持大文件：pip install dashscope"
+            "较大文件需上传到云端。请安装 dashscope 以支持这类文件：pip install dashscope"
         )
     finally:
         if local_path.exists():
@@ -425,7 +425,7 @@ def render_main_page():
     uploaded_file = st.file_uploader(
         "上传图片或视频",
         type=ALL_ACCEPTED,
-        help="图片：JPG/PNG/GIF/WEBP/BMP | 视频：MP4/MOV/AVI/WEBM/MKV/M4V/WMV。上传限制在 .streamlit/config.toml 中配置（默认 500MB）"
+        help="图片：JPG/PNG/GIF/WEBP/BMP | 视频：MP4/MOV/AVI/WEBM/MKV/M4V/WMV。上传限制在 .streamlit/config.toml 中配置。"
     )
     
     if uploaded_file is None:
@@ -472,7 +472,7 @@ def render_main_page():
                     file_size_mb = len(file_bytes) / (1024 * 1024)
                     is_large = file_size_mb > 10
 
-                    # 大文件（>10MB）：必须走上传，避免 Base64 超限
+                    # 较大文件：必须走上传，避免 Base64 超限
                     if is_large:
                         with st.status("⏳ 正在上传到云端...", expanded=True) as status:
                             file_url = _save_and_upload(uploaded_file)
@@ -637,7 +637,7 @@ def main():
     # 大文件上传状态诊断（便于排查 dashscope 问题）
     with st.sidebar.expander("📁 大文件上传状态"):
         if HAS_DASHSCOPE_FILE:
-            st.success("已就绪：大文件（>10MB）可上传")
+            st.success("已就绪：支持较大文件上传")
         else:
             st.warning("大文件上传不可用")
             if _dashscope_file_error:

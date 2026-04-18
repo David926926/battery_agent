@@ -110,231 +110,31 @@ def ensure_media():
 
     raise RuntimeError("❌ 请提供 MEDIA_PATH(本地文件) 或 MEDIA_URL(公网直链) 之一。")
 
-CHECKLISTS = {
-    "main_detail": {
-        "title": "电商渠道 主图&商详 Checklist",
-        "dimensions": {
-            "Background": {
-                "issue_tags": [
-                    "场景无关",
-                    "背景杂乱或噪点过多",
-                    "明显的“AI生成”痕迹",
-                    "人物或物体部位缺失/断裂",
-                    "明显拼贴或合成痕迹",
-                ],
-                "severe": [
-                    "场景无关",
-                    "明显的“AI生成”痕迹",
-                    "人物或物体部位缺失/断裂",
-                    "明显拼贴或合成痕迹",
-                ],
-                "minor": [
-                    "背景杂乱或噪点过多",
-                ],
-                "rules": {
-                    "risky": "severe>=1 OR minor>=3",
-                    "acceptable": "severe==0 AND minor in [1,2]",
-                    "excellent": "severe==0 AND minor==0",
-                }
-            },
-            "Object": {
-                "issue_tags": [
-                    "产品包装文字模糊或不可读",
-                    "物体轮廓不完整（缺失或被裁切）",
-                    "多余或重复部件（轮廓异常延展）",
-                    "物体摆放或姿态不符合物理逻辑",
-                    "光影或透视与场景不一致",
-                    "比例或尺度不合理",
-                    "未展示产品实物细节（增强确定性）",
-                ],
-                "severe": [
-                    "产品包装文字模糊或不可读",
-                    "物体轮廓不完整（缺失或被裁切）",
-                    "多余或重复部件（轮廓异常延展）",
-                    "物体摆放或姿态不符合物理逻辑",
-                    "比例或尺度不合理",
-                ],
-                "minor": [
-                    "光影或透视与场景不一致",
-                    "未展示产品实物细节（增强确定性）",
-                ],
-                "rules": {
-                    "risky": "severe>=1 OR minor>=2",
-                    "acceptable": "severe==0 AND minor==1",
-                    "excellent": "severe==0 AND minor==0",
-                }
-            },
-            "Text": {
-                "issue_tags": [
-                    "行距或断行不合理",
-                    "风格与品牌或海报调性不符",
-                    "笔画渲染错误",
-                    "拼写错误或错别字",
-                    "缺少应出现的覆盖文字",
-                    "字体过小",
-                    "文字相互重叠（或与主体重叠）",
-                ],
-                "severe": [
-                    "笔画渲染错误",
-                    "拼写错误或错别字",
-                    "缺少应出现的覆盖文字",
-                    "字体过小",
-                    "文字相互重叠（或与主体重叠）",
-                ],
-                "minor": [
-                    "行距或断行不合理",
-                    "风格与品牌或海报调性不符",
-                ],
-                "rules": {
-                    "risky": "severe>=1 OR minor>=3",
-                    "acceptable": "severe==0 AND minor in [1,2]",
-                    "excellent": "severe==0 AND minor==0",
-                }
-            },
-            "Layout": {
-                "issue_tags": [
-                    "画面过于拥挤或杂乱",
-                    "留白过多",
-                    "构图视觉不平衡",
-                    "重要元素被遮挡或互相遮挡",
-                    "信息层级不清晰",
-                ],
-                "severe": ["重要元素被遮挡或互相遮挡"],
-                "minor": [
-                    "画面过于拥挤或杂乱",
-                    "留白过多",
-                    "构图视觉不平衡",
-                    "信息层级不清晰",
-                ],
-                "rules": {
-                    "risky": "severe>=1 OR minor>=2",
-                    "acceptable": "severe==0 AND minor==1",
-                    "excellent": "severe==0 AND minor==0",
-                }
-            }
-        },
-        "overall_rule": {
-            "score_formula": "(B+O+T+L)/4",
-            "grade": {
-                "excellent": "overall_score>=1.5 AND no_dim_risky",
-                "acceptable": "0.75<=overall_score<1.5 AND risky_dims<=1",
-                "risky": "overall_score<0.75 OR risky_dims>=2",
-            }
-        }
-    },
+CHECKLISTS_PATH = Path(__file__).with_name("checklists.json")
 
-    "media_ad": {
-        "title": "电商渠道 媒介投放素材 Checklist",
-        "dimensions": {
-            "Background": {
-                "issue_tags": [
-                    "场景或语境较弱",
-                    "场景无关",
-                    "背景杂乱或噪点过多",
-                    "明显的“AI生成”痕迹",
-                    "人物或物体部位缺失/断裂",
-                    "明显拼贴或合成痕迹",
-                    "场景创新度不够",
-                ],
-                "severe": [
-                    "场景无关",
-                    "明显的“AI生成”痕迹",
-                    "人物或物体部位缺失/断裂",
-                    "明显拼贴或合成痕迹",
-                ],
-                "minor": [
-                    "场景或语境较弱",
-                    "背景杂乱或噪点过多",
-                    "场景创新度不够",
-                ],
-                "rules": {
-                    "risky": "severe>=1 OR minor>=3",
-                    "acceptable": "severe==0 AND minor in [1,2]",
-                    "excellent": "severe==0 AND minor==0",
-                }
-            },
-            "Object": {
-                "issue_tags": [
-                    "产品包装文字模糊或不可读",
-                    "物体轮廓不完整（缺失或被裁切）",
-                    "多余或重复部件（轮廓异常延展）",
-                    "物体摆放或姿态不符合物理逻辑",
-                    "光影或透视与场景不一致",
-                    "比例或尺度不合理",
-                    "明显合成痕迹",
-                    "产品未形成视觉焦点",
-                    "用户难以理解该设备为何会使用本产品（如燃气表）",
-                ],
-                "severe": [
-                    "产品包装文字模糊或不可读",
-                    "物体轮廓不完整（缺失或被裁切）",
-                    "多余或重复部件（轮廓异常延展）",
-                    "物体摆放或姿态不符合物理逻辑",
-                    "比例或尺度不合理",
-                    "用户难以理解该设备为何会使用本产品（如燃气表）",
-                ],
-                "minor": [
-                    "光影或透视与场景不一致",
-                    "明显合成痕迹",
-                    "产品未形成视觉焦点",
-                ],
-                "rules": {
-                    "risky": "severe>=1 OR minor>=2",
-                    "acceptable": "severe==0 AND minor==1",
-                    "excellent": "severe==0 AND minor==0",
-                }
-            },
-            "Text": {
-                "issue_tags": [
-                    "拼写错误或错别字",
-                    "缺少应出现的覆盖文字",
-                    "字体过小",
-                    "文字相互重叠（或与主体重叠）",
-                ],
-                "severe": [
-                    "拼写错误或错别字",
-                    "缺少应出现的覆盖文字",
-                    "字体过小",
-                    "文字相互重叠（或与主体重叠）",
-                ],
-                "minor": [
-                ],
-                "rules": {
-                    "risky": "severe>=1 OR minor>=3",
-                    "acceptable": "severe==0 AND minor in [1,2]",
-                    "excellent": "severe==0 AND minor==0",
-                }
-            },
-            "Layout": {
-                "issue_tags": [
-                    "画面过于拥挤或杂乱",
-                    "留白过多",
-                    "构图视觉不平衡",
-                    "重要元素被遮挡或互相遮挡",
-                ],
-                "severe": ["重要元素被遮挡或互相遮挡"],
-                "minor": [
-                    "画面过于拥挤或杂乱",
-                    "留白过多",
-                    "构图视觉不平衡",
-                ],
-                "rules": {
-                    "risky": "severe>=1 OR minor>=2",
-                    "acceptable": "severe==0 AND minor==1",
-                    "excellent": "severe==0 AND minor==0",
-                }
-            }
-        },
-        "overall_rule": {  # 你这套和主图商详一致
-            "score_formula": "(B+O+T+L)/4",
-            "grade": {
-                "excellent": "overall_score>=1.5 AND no_dim_risky",
-                "acceptable": "0.75<=overall_score<1.5 AND risky_dims<=1",
-                "risky": "overall_score<0.75 OR risky_dims>=2",
-            }
-        }
-    }
-}
+
+def load_checklists() -> dict:
+    return json.loads(CHECKLISTS_PATH.read_text(encoding="utf-8"))
+
+
+def checklist_item_name(item: str | dict) -> str:
+    if isinstance(item, dict):
+        return str(item.get("name", "")).strip()
+    return str(item).strip()
+
+
+def checklist_item_names(items: list) -> list[str]:
+    return [name for item in items for name in [checklist_item_name(item)] if name]
+
+
+def format_checklist_block(items: list) -> str:
+    names = checklist_item_names(items)
+    if not names:
+        return "- 无"
+    return "\n- ".join(names)
+
+
+CHECKLISTS = load_checklists()
 
 def build_dimension_output_schema(dim_names: list[str]) -> str:
     blocks = []
@@ -427,9 +227,9 @@ def build_prompt(user_content: str, checklist_type: str) -> str:
     # 拼维度说明（让模型“先勾 tag，再数 severe/minor，再按规则判定”）
     dim_blocks = []
     for dim_name, dim_cfg in cfg["dimensions"].items():
-        tags = "\n- ".join(dim_cfg["issue_tags"])
-        severe = "\n- ".join(dim_cfg["severe"])
-        minor = "\n- ".join(dim_cfg["minor"])
+        tags = format_checklist_block(dim_cfg["issue_tags"])
+        severe = format_checklist_block(dim_cfg["severe"])
+        minor = format_checklist_block(dim_cfg["minor"])
 
         rules = dim_cfg["rules"]
         dim_blocks.append(f"""

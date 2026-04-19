@@ -2110,6 +2110,9 @@ def render_edit_loop_section(modules: dict[str, Any], result: dict[str, Any]) ->
             (label for label, path in output_options.items() if path == selected_base_path),
             list(output_options.keys())[0],
         )
+        current_radio_value = st.session_state.get("edit_loop_base_candidate")
+        if current_radio_value not in output_options or output_options.get(str(current_radio_value)) != output_options[default_label]:
+            st.session_state["edit_loop_base_candidate"] = default_label
         base_label = st.radio(
             "选择一张最新候选图作为 Base",
             options=list(output_options.keys()),
@@ -2144,6 +2147,11 @@ def render_edit_loop_section(modules: dict[str, Any], result: dict[str, Any]) ->
             st.caption("如果不想从当前最新候选中选，也可以改成直接上传一张 Base 图。")
         else:
             st.caption("当前还没有最新候选，请直接上传一张 Base 图开始 Edit。")
+
+    if base_image_path:
+        st.markdown("#### 当前已锁定的 Base 图")
+        st.caption(f"文件：{Path(base_image_path).name}")
+        render_image(base_image_path, caption="下一轮 Edit 将基于这张图")
 
     uploaded_components = st.file_uploader(
         "上传要加入的 Components（最多 2 个）",

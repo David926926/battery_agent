@@ -5,6 +5,7 @@ import importlib.util
 import json
 import mimetypes
 import os
+import re
 import sys
 import warnings
 from contextlib import contextmanager
@@ -23,6 +24,17 @@ warnings.filterwarnings("ignore")
 ROOT = Path(__file__).resolve().parents[1]
 INTERFACE_ROOT = Path(__file__).resolve().parent
 WORKSPACE_ROOT = INTERFACE_ROOT / "workspace"
+SUPPORTED_IMAGE_UPLOAD_TYPES = ["png", "jpg", "jpeg", "webp"]
+COMPRESSION_FORMAT_CONFIG = {
+    "JPEG": {"format": "JPEG", "suffix": ".jpg", "mime": "image/jpeg"},
+    "WebP": {"format": "WEBP", "suffix": ".webp", "mime": "image/webp"},
+    "PNG": {"format": "PNG", "suffix": ".png", "mime": "image/png"},
+}
+HD_REDRAW_STYLE_PROMPTS = {
+    "Natural": "保留真实观感，自然增强细节与层次，避免过度锐化。",
+    "Sharp": "适度提升锐度与边缘清晰度，让纹理更明确，但不要引入明显噪点。",
+    "Artistic": "在保留主体内容的前提下，提升质感、层次和视觉表现力，让画面更有完成度。",
+}
 
 
 st.set_page_config(
@@ -1254,6 +1266,172 @@ def prepare_image_for_model(path: str, output_dir: Path, max_side: int = 1600, j
     return str(target)
 
 
+def get_session_workspace_dir() -> Path:
+    ensure_workspace()
+    session_dir = WORKSPACE_ROOT / get_session_key()
+    session_dir.mkdir(parents=True, exist_ok=True)
+    return session_dir
+
+
+def sanitize_filename(value: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", value.strip())
+    return cleaned.strip("._") or "image"
+
+
+def encode_download_bytes(data: bytes) -> bytes:
+    """Round-trip through base64 so download payloads stay binary-safe."""
+    return base64.b64decode(base64.b64encode(data))
+
+
+def _resize_image_if_needed(image: Image.Image, max_side: int) -> Image.Image:
+    width, height = image.size
+    longest = max(width, height)
+    if longest <= max_side:
+        return image.copy()
+    scale = max_side / longest
+    return image.resize((max(1, int(width * scale)), max(1, int(height * scale))), Image.LANCZOS)
+
+
+def compress_image_with_options(
+    source_path: str | Path,
+    output_dir: Path,
+    *,
+    max_side: int = 1600,
+    jpeg_quality: int = 85,
+    output_format: str = "JPEG",
+) -> dict[str, Any]:
+    """Compress an image using user-controlled parameters and persist it to disk."""
+    source = Path(source_path)
+    if output_format not in COMPRESSION_FORMAT_CONFIG:
+        raise ValueError(f"不支持的输出格式：{output_format}")
+
+    config = COMPRESSION_FORMAT_CONFIG[output_format]
+    output_dir.mkdir(parents=True, exist_ok=True)
+    target = output_dir / f"{sanitize_filename(source.stem)}_compressed{config['suffix']}"
+
+    with Image.open(source) as image:
+        image.load()
+        resized = _resize_image_if_needed(image, max_side=max_side)
+        width, height = resized.size
+        save_kwargs: dict[str, Any] = {}
+
+        if output_format == "JPEG":
+            if resized.mode in {"RGBA", "LA"} or (resized.mode == "P" and "transparency" in resized.info):
+                background = Image.new("RGB", resized.size, (255, 255, 255))
+                alpha = resized.convert("RGBA")
+                background.paste(alpha, mask=alpha.split()[-1])
+                final_image = background
+            else:
+                final_image = resized.convert("RGB")
+            save_kwargs = {"quality": jpeg_quality, "optimize": True}
+        elif output_format == "WebP":
+            final_image = resized.convert("RGBA") if resized.mode in {"RGBA", "LA", "P"} else resized.convert("RGB")
+            save_kwargs = {"quality": jpeg_quality, "method": 6}
+        else:
+            final_image = resized.convert("RGBA") if resized.mode in {"RGBA", "LA", "P"} else resized.convert("RGB")
+            save_kwargs = {"optimize": True}
+
+        final_image.save(target, format=config["format"], **save_kwargs)
+
+    return {
+        "path": str(target),
+        "mime": config["mime"],
+        "name": target.name,
+        "width": width,
+        "height": height,
+        "size_bytes": target.stat().st_size,
+    }
+
+
+def format_file_size(size_bytes: int) -> str:
+    units = ["B", "KB", "MB", "GB"]
+    value = float(size_bytes)
+    for unit in units:
+        if value < 1024 or unit == units[-1]:
+            return f"{value:.1f} {unit}" if unit != "B" else f"{int(value)} B"
+        value /= 1024
+    return f"{size_bytes} B"
+
+
+def build_hd_redraw_prompt(upscale_factor: int, enhancement_style: str, user_prompt: str) -> str:
+    prompt_parts = [
+        "请对这张图片进行高清重绘与质量增强。",
+        "保持原有主体、构图、产品信息、颜色倾向和场景内容不变。",
+        "重点处理压缩痕迹、编辑伪影、边缘毛刺、局部模糊与细节缺失。",
+        f"目标放大倍数：{upscale_factor}x。",
+        f"增强风格：{enhancement_style}。{HD_REDRAW_STYLE_PROMPTS[enhancement_style]}",
+    ]
+    if user_prompt.strip():
+        prompt_parts.append(f"额外要求：{user_prompt.strip()}")
+    else:
+        prompt_parts.append("额外要求：Enhance details and sharpness without changing content.")
+    return " ".join(prompt_parts)
+
+
+def hd_redraw_image(
+    modules: dict[str, Any],
+    image_path: str,
+    output_dir: Path,
+    *,
+    upscale_factor: int = 2,
+    enhancement_style: str = "Natural",
+    user_prompt: str = "",
+    preferred_model: str | None = None,
+) -> dict[str, Any]:
+    """Use the existing Qwen image-edit path to redraw an image in higher quality."""
+    if upscale_factor not in {1, 2, 4}:
+        raise ValueError("Upscale factor 仅支持 1x、2x、4x。")
+    if enhancement_style not in HD_REDRAW_STYLE_PROMPTS:
+        raise ValueError(f"不支持的增强风格：{enhancement_style}")
+
+    client = modules["QwenImageEditClient"]()
+    if not client.is_enabled():
+        raise RuntimeError("DASHSCOPE_API_KEY 未配置，无法执行 HD Redraw。")
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    source = Path(image_path)
+    target_path = output_dir / f"{sanitize_filename(source.stem)}_hd_redraw.png"
+    prompt = build_hd_redraw_prompt(upscale_factor, enhancement_style, user_prompt)
+
+    result = client.retouch(
+        image_path=str(source),
+        instruction=prompt,
+        output_path=str(target_path),
+        negative_prompt=(
+            "改变构图, 新增主体, 删除主体, 错别字, 文本, logo, watermark, duplicate object, extra hands, "
+            "deformed details, oversharpen, oversaturated, low quality, blur"
+        ),
+        preferred_model=preferred_model,
+    )
+
+    output_path = Path(result.get("path") or "")
+    if not output_path.exists():
+        raise RuntimeError("HD Redraw 未返回有效图片。")
+    if output_path.stat().st_size <= 0:
+        raise RuntimeError("HD Redraw 返回的图片为空文件。")
+
+    with Image.open(source) as original_image:
+        original_size = original_image.size
+    with Image.open(output_path) as enhanced_image:
+        enhanced_image.load()
+        target_size = (max(1, original_size[0] * upscale_factor), max(1, original_size[1] * upscale_factor))
+        if upscale_factor > 1 and (
+            enhanced_image.width < target_size[0] or enhanced_image.height < target_size[1]
+        ):
+            post_upscaled = enhanced_image.resize(target_size, Image.LANCZOS)
+            post_upscaled.save(output_path, format="PNG", optimize=True)
+
+    return {
+        "path": str(output_path),
+        "name": output_path.name,
+        "mime": "image/png",
+        "size_bytes": output_path.stat().st_size,
+        "model": result.get("model") or preferred_model or modules["get_default_model"]("image_edit"),
+        "attempted_models": result.get("attempted_models") or [],
+        "source_url": result.get("source_url") or "",
+    }
+
+
 def _image_to_data_url(path: str) -> str:
     mime = mimetypes.guess_type(path)[0] or "image/jpeg"
     return f"data:{mime};base64,{base64.b64encode(Path(path).read_bytes()).decode('utf-8')}"
@@ -1630,6 +1808,103 @@ def render_evaluation_page(modules: dict[str, Any]) -> None:
             st.caption("点击上方按钮，让模型基于当前评估结果生成一段文字总结。")
 
         build_eval_dimensions_ui(st.session_state["evaluation_result"])
+
+    render_manual_compression_section()
+
+
+def render_hd_redraw_section(modules: dict[str, Any]) -> None:
+    st.markdown("---")
+    with st.expander("可选：HD Redraw 高清重绘", expanded=False):
+        st.caption("上传生产结果或已编辑图片，调用 Qwen 对图片做高清重绘和质量增强。")
+        uploaded = st.file_uploader(
+            "上传待增强图片",
+            type=SUPPORTED_IMAGE_UPLOAD_TYPES,
+            key="hd_redraw_upload",
+        )
+        option_col1, option_col2, option_col3 = st.columns(3)
+        with option_col1:
+            upscale_label = st.selectbox("Upscale factor", options=["1x", "2x", "4x"], index=1, key="hd_redraw_factor")
+        with option_col2:
+            enhancement_style = st.selectbox(
+                "Enhancement style",
+                options=["Natural", "Sharp", "Artistic"],
+                index=0,
+                key="hd_redraw_style",
+            )
+        with option_col3:
+            redraw_model = render_model_selectbox(
+                modules,
+                family="image_edit",
+                label="HD Redraw 首选模型",
+                key="hd_redraw_preferred_model",
+                default_model=modules["get_default_model"]("image_edit"),
+            )
+        redraw_prompt = st.text_input(
+            "可选提示词",
+            value="Enhance details and sharpness without changing content",
+            key="hd_redraw_prompt",
+        )
+
+        if uploaded:
+            render_image(uploaded.getvalue(), caption=f"原图预览：{uploaded.name}")
+
+        if st.button("执行 HD Redraw", key="hd_redraw_submit", use_container_width=True):
+            if not uploaded:
+                st.error("请先上传一张需要增强的图片。")
+            else:
+                try:
+                    run_dir = make_run_dir("hd_redraw")
+                    input_path = save_upload(uploaded, run_dir / "inputs")
+                    with st.spinner("Qwen 正在执行高清重绘，请稍候..."):
+                        result = hd_redraw_image(
+                            modules,
+                            str(input_path),
+                            run_dir / "enhanced",
+                            upscale_factor=int(upscale_label.replace("x", "")),
+                            enhancement_style=enhancement_style,
+                            user_prompt=redraw_prompt,
+                            preferred_model=redraw_model,
+                        )
+                    st.session_state["hd_redraw_result"] = {
+                        "input_path": str(input_path),
+                        "input_name": uploaded.name,
+                        "input_size_bytes": input_path.stat().st_size,
+                        "factor": upscale_label,
+                        "style": enhancement_style,
+                        **result,
+                    }
+                    st.session_state.pop("hd_redraw_error", None)
+                except Exception as exc:
+                    print(f"[hd_redraw] {exc}")
+                    st.session_state["hd_redraw_error"] = str(exc)
+                    st.session_state.pop("hd_redraw_result", None)
+
+        if st.session_state.get("hd_redraw_error"):
+            st.error(f"HD Redraw 失败：{st.session_state['hd_redraw_error']}")
+
+        result = st.session_state.get("hd_redraw_result")
+        if result:
+            original_path = Path(result["input_path"])
+            enhanced_path = Path(result["path"])
+            if original_path.exists() and enhanced_path.exists():
+                left, right = st.columns(2)
+                with left:
+                    render_image(str(original_path), caption=f"原图 · {result['input_name']}")
+                    st.caption(f"文件大小：{format_file_size(result['input_size_bytes'])}")
+                with right:
+                    render_image(str(enhanced_path), caption=f"增强后 · {result['name']}")
+                    st.caption(f"文件大小：{format_file_size(result['size_bytes'])}")
+                st.caption(
+                    f"Upscale factor：{result['factor']} | Enhancement style：{result['style']} | 实际模型：{result['model']}"
+                )
+                st.download_button(
+                    "下载增强结果",
+                    encode_download_bytes(enhanced_path.read_bytes()),
+                    file_name=enhanced_path.name,
+                    mime=result["mime"],
+                    key="hd_redraw_download",
+                    use_container_width=False,
+                )
 
 
 def render_production_page(modules: dict[str, Any]) -> None:
@@ -2039,6 +2314,111 @@ def render_production_page(modules: dict[str, Any]) -> None:
             render_text_generator_page(modules, embedded=True)
 
     render_edit_loop_section(modules, result)
+    render_hd_redraw_section(modules)
+
+
+def render_manual_compression_section() -> None:
+    st.markdown("---")
+    with st.expander("可选：手动图片压缩工具", expanded=False):
+        st.caption("手动压缩单张或多张图片，不影响现有的自动压缩逻辑。")
+        uploaded_files = st.file_uploader(
+            "上传待压缩图片",
+            type=SUPPORTED_IMAGE_UPLOAD_TYPES,
+            accept_multiple_files=True,
+            key="manual_compression_uploads",
+        )
+        option_col1, option_col2, option_col3 = st.columns(3)
+        with option_col1:
+            max_side = st.slider("Max side length", min_value=512, max_value=4096, value=1600, step=64)
+        with option_col2:
+            jpeg_quality = st.slider("JPEG quality", min_value=50, max_value=100, value=85, step=1)
+        with option_col3:
+            output_format = st.selectbox("Output format", options=["JPEG", "WebP", "PNG"], index=0)
+
+        if st.button("执行压缩", key="manual_compression_submit", use_container_width=True):
+            if not uploaded_files:
+                st.error("请至少上传一张图片。")
+            else:
+                try:
+                    run_dir = make_run_dir("manual_compression")
+                    input_dir = run_dir / "inputs"
+                    compressed_dir = run_dir / "compressed"
+                    results: list[dict[str, Any]] = []
+                    for uploaded_file in uploaded_files:
+                        try:
+                            source_path = save_upload(uploaded_file, input_dir)
+                            compressed = compress_image_with_options(
+                                source_path,
+                                compressed_dir,
+                                max_side=max_side,
+                                jpeg_quality=jpeg_quality,
+                                output_format=output_format,
+                            )
+                            results.append(
+                                {
+                                    "input_name": uploaded_file.name,
+                                    "input_path": str(source_path),
+                                    "input_size_bytes": source_path.stat().st_size,
+                                    "output_format": output_format,
+                                    "max_side": max_side,
+                                    "jpeg_quality": jpeg_quality,
+                                    **compressed,
+                                }
+                            )
+                        except Exception as item_exc:
+                            print(f"[manual_compression] {uploaded_file.name}: {item_exc}")
+                            results.append(
+                                {
+                                    "input_name": uploaded_file.name,
+                                    "error": f"处理失败：{item_exc}",
+                                }
+                            )
+                    st.session_state["manual_compression_results"] = results
+                    st.session_state.pop("manual_compression_error", None)
+                except Exception as exc:
+                    print(f"[manual_compression] {exc}")
+                    st.session_state["manual_compression_error"] = str(exc)
+                    st.session_state.pop("manual_compression_results", None)
+
+        if st.session_state.get("manual_compression_error"):
+            st.error(f"图片压缩失败：{st.session_state['manual_compression_error']}")
+
+        results = st.session_state.get("manual_compression_results") or []
+        if results:
+            st.markdown("#### 压缩结果")
+            for idx, item in enumerate(results, start=1):
+                if item.get("error"):
+                    st.warning(f"{item['input_name']}：{item['error']}")
+                    continue
+                input_path = Path(item["input_path"])
+                output_path = Path(item["path"])
+                if not input_path.exists() or not output_path.exists():
+                    st.warning(f"{item['input_name']}：压缩结果文件不存在，请重新执行。")
+                    continue
+                st.markdown(f"##### {idx}. {item['input_name']}")
+                preview_left, preview_right = st.columns(2)
+                with preview_left:
+                    render_image(str(input_path), caption="原图")
+                    st.caption(f"原始大小：{format_file_size(item['input_size_bytes'])}")
+                with preview_right:
+                    render_image(str(output_path), caption=f"压缩后 · {item['output_format']}")
+                    st.caption(
+                        f"压缩后：{format_file_size(item['size_bytes'])} | 尺寸：{item['width']}×{item['height']}"
+                    )
+                saved_ratio = 0.0
+                if item["input_size_bytes"] > 0:
+                    saved_ratio = 1 - (item["size_bytes"] / item["input_size_bytes"])
+                st.caption(
+                    f"Max side：{item['max_side']} px | Quality：{item['jpeg_quality']} | 节省体积：{saved_ratio:.1%}"
+                )
+                st.download_button(
+                    f"下载压缩文件 {idx}",
+                    encode_download_bytes(output_path.read_bytes()),
+                    file_name=output_path.name,
+                    mime=item["mime"],
+                    key=f"manual_compression_download_{idx}",
+                    use_container_width=False,
+                )
 
 
 def render_edit_loop_section(modules: dict[str, Any], result: dict[str, Any]) -> None:

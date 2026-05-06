@@ -88,14 +88,6 @@ def _tone_labels(tones: list[str]) -> list[str]:
     return [mapping.get(item, item) for item in tones]
 
 
-def _realism_label(level: str) -> str:
-    return {
-        "realistic": "高级写实",
-        "semi_realistic": "半写实",
-        "conceptual": "概念感表达",
-    }.get(level, level)
-
-
 def _use_case_label(use_case: str) -> str:
     return {
         "main_detail": "主图/商详",
@@ -137,6 +129,8 @@ def build_task_brief(state: RunState) -> RunState:
     request = state.request
     image_sample_count = max(1, int(request.direction_count or 1)) * max(1, int(request.variants_per_direction or 1))
     base_must_have = list(request.must_have)
+    if request.key_appliances:
+        base_must_have.append(f"关键用电器：{'、'.join(request.key_appliances)}")
     if request.reserve_component_space:
         base_must_have.append("预留干净可用的组件摆放空间")
     base_must_have.extend(["无文字", "无Logo", "无产品主体"])
@@ -151,10 +145,11 @@ def build_task_brief(state: RunState) -> RunState:
     quality_constraints = [
         "保持高分辨率和完整空间透视。",
         f"视觉密度控制为 {request.visual_density}，中景不过度拥挤。",
-        f"真实感程度为 {_realism_label(request.realism_level)}。",
     ]
     if request.background_prompt.strip():
         quality_constraints.append(f"补充描述：{request.background_prompt.strip()}")
+    if request.target_market.strip():
+        quality_constraints.append(f"目标国家/市场：{request.target_market.strip()}，场景元素、住宅环境、人物气质和用电器表达需要符合当地语境。")
 
     negative_constraints = _dedupe(
         list(request.must_avoid)
@@ -176,6 +171,7 @@ def build_task_brief(state: RunState) -> RunState:
         workflow_type=request.workflow_type,
         audience=request.audience.strip() or "电商消费者",
         scene=request.scene.strip() or (request.background_prompt.strip() if request.generation_mode == "text_to_background" else "基于参考图提取背景"),
+        key_appliances=_dedupe(list(request.key_appliances)),
         style=request.style.strip(),
         must_have=_dedupe(base_must_have),
         must_avoid=negative_constraints,
@@ -191,6 +187,7 @@ def build_task_brief(state: RunState) -> RunState:
         variants_per_direction=request.variants_per_direction if request.generation_mode == "text_to_background" else image_sample_count,
         source_summary=_build_source_summary(state),
         prompt_context=request.background_prompt.strip(),
+        target_market=request.target_market.strip(),
         hard_constraints=hard_constraints,
         quality_constraints=quality_constraints,
         negative_constraints=negative_constraints,
@@ -257,6 +254,7 @@ def _fallback_directions(brief: TaskBrief) -> list[CreativeDirection]:
 
     scene_elements = _dedupe(
         [brief.scene, brief.style]
+        + brief.key_appliances[:3]
         + brief.selling_points[:2]
     )
     directions: list[CreativeDirection] = []
@@ -279,7 +277,7 @@ def _fallback_directions(brief: TaskBrief) -> list[CreativeDirection]:
                 direction_id=direction_id,
                 title=f"{theme}{idx + 1}",
                 summary=f"围绕{brief.scene}构建可直接商用的纯背景，强调{brief.brand_tone or '可靠、温暖、专业'}调性。",
-                visual_theme=f"{theme}，突出{_realism_label(brief.realism_level)}与可后期摆放的空间感。",
+                visual_theme=f"{theme}，突出商用背景质感与可后期摆放的空间感。",
                 primary_palette=palette,
                 scene_elements=scene_elements or ["纯背景空间感", "柔和光影层次"],
                 composition="主体视觉重心偏中后景，保留一个干净区域供后续组件摆放，前中后景层次明确。",
@@ -300,19 +298,19 @@ def _coerce_creative_directions(payload: dict[str, Any], brief: TaskBrief) -> li
     for idx, item in enumerate(raw_directions[: max(1, brief.direction_count)], start=1):
         if not isinstance(item, dict):
             continue
-            direction = CreativeDirection(
-                direction_id=str(item.get("direction_id") or f"direction_{idx:02d}"),
-                title=str(item.get("title") or f"创意方向{idx}"),
-                summary=str(item.get("summary") or ""),
-                visual_theme=str(item.get("visual_theme") or ""),
-                primary_palette=_normalize_string_list(item.get("primary_palette")),
-                scene_elements=_normalize_string_list(item.get("scene_elements")),
-                composition=str(item.get("composition") or ""),
-                space_reservation=str(item.get("space_reservation") or ""),
-                fit_for_use_case=str(item.get("fit_for_use_case") or ""),
-                risk_points=_normalize_string_list(item.get("risk_points")),
-                recommendation_reason=str(item.get("recommendation_reason") or ""),
-            )
+        direction = CreativeDirection(
+            direction_id=str(item.get("direction_id") or f"direction_{idx:02d}"),
+            title=str(item.get("title") or f"创意方向{idx}"),
+            summary=str(item.get("summary") or ""),
+            visual_theme=str(item.get("visual_theme") or ""),
+            primary_palette=_normalize_string_list(item.get("primary_palette")),
+            scene_elements=_normalize_string_list(item.get("scene_elements")),
+            composition=str(item.get("composition") or ""),
+            space_reservation=str(item.get("space_reservation") or ""),
+            fit_for_use_case=str(item.get("fit_for_use_case") or ""),
+            risk_points=_normalize_string_list(item.get("risk_points")),
+            recommendation_reason=str(item.get("recommendation_reason") or ""),
+        )
         directions.append(direction)
     if not directions:
         raise ValueError("no valid creative directions")
@@ -390,6 +388,8 @@ def _build_prompt_sections(brief: TaskBrief, direction: CreativeDirection) -> di
     )
     scene_description = (
         f"围绕“{brief.scene}”展开，目标人群是{brief.audience}。"
+        f"关键用电器包括：{'、'.join(brief.key_appliances) or '未指定'}。"
+        f"目标国家/市场：{brief.target_market or '未指定'}。"
         f"视觉主题为{direction.visual_theme}，优先体现的场景元素包括：{'、'.join(direction.scene_elements) or '空间层次、光影和环境氛围'}。"
     )
     structure = (
@@ -398,7 +398,7 @@ def _build_prompt_sections(brief: TaskBrief, direction: CreativeDirection) -> di
         else direction.composition
     )
     style_and_light = (
-        f"整体风格为{brief.style or _realism_label(brief.realism_level)}，"
+        f"整体风格为{brief.style or '稳定、干净、适合商业后期的背景风格'}，"
         f"品牌调性优先级是{brief.brand_tone or '可靠、温暖、专业'}，"
         f"主色调参考：{'、'.join(direction.primary_palette) or '克制、商用、稳定'}。"
     )

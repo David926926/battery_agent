@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import csv
 import importlib.util
 import json
 import mimetypes
@@ -25,6 +26,7 @@ ROOT = Path(__file__).resolve().parents[1]
 INTERFACE_ROOT = Path(__file__).resolve().parent
 WORKSPACE_ROOT = INTERFACE_ROOT / "workspace"
 SUPPORTED_IMAGE_UPLOAD_TYPES = ["png", "jpg", "jpeg", "webp"]
+TAG_CSV_PATH = ROOT / "南孚内容素材标签建设.csv"
 COMPRESSION_FORMAT_CONFIG = {
     "JPEG": {"format": "JPEG", "suffix": ".jpg", "mime": "image/jpeg"},
     "WebP": {"format": "WEBP", "suffix": ".webp", "mime": "image/webp"},
@@ -536,6 +538,31 @@ def save_upload(uploaded_file: Any, target_dir: Path) -> Path:
     return target_path
 
 
+@st.cache_data
+def load_material_tag_options() -> dict[str, list[str]]:
+    fallback = {
+        "人群": ["宝妈/育儿人群", "家庭守护者", "职场白领/上班族", "科技/游戏玩家"],
+        "场景": ["家居日用", "儿童娱乐", "智能安防", "职场办公"],
+    }
+    if not TAG_CSV_PATH.exists():
+        return fallback
+
+    grouped: dict[str, list[str]] = {}
+    with TAG_CSV_PATH.open(encoding="utf-8-sig", newline="") as f:
+        for row in csv.DictReader(f):
+            category = str(row.get("标签分类") or "").strip()
+            tag = str(row.get("具体标签") or "").strip()
+            if not category or not tag:
+                continue
+            grouped.setdefault(category, [])
+            if tag not in grouped[category]:
+                grouped[category].append(tag)
+    for category, defaults in fallback.items():
+        if not grouped.get(category):
+            grouped[category] = defaults
+    return grouped
+
+
 def render_chip_list(items: list[str], empty_text: str = "暂无") -> None:
     if not items:
         st.caption(empty_text)
@@ -776,6 +803,173 @@ def run_evaluation(
     return result
 
 
+def run_evaluation_for_path(
+    modules: dict[str, Any],
+    eval_module: Any,
+    image_path: str | Path,
+    checklist_type: str,
+    content_text: str,
+    preferred_model: str | None = None,
+    output_dir: Path | None = None,
+) -> dict[str, Any]:
+    api_key = os.getenv("DASHSCOPE_API_KEY", "").strip()
+    if not api_key:
+        raise RuntimeError("DASHSCOPE_API_KEY 未配置。")
+
+    source_path = Path(image_path)
+    if not source_path.exists():
+        raise RuntimeError(f"待评估图片不存在：{source_path}")
+
+    run_dir = output_dir or make_run_dir("production_evaluation")
+    run_dir.mkdir(parents=True, exist_ok=True)
+    media_block = eval_module.file_to_media_block(str(source_path))
+    prompt = eval_module.build_prompt(content_text, checklist_type=checklist_type)
+    client = OpenAI(api_key=api_key, base_url=eval_module.BASE_URL)
+    completion, resolved_model, attempts = modules["run_with_model_fallback"](
+        family="vision_chat",
+        preferred_model=preferred_model or eval_module.MODEL_NAME,
+        call=lambda model_name: client.chat.completions.create(
+            model=model_name,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        media_block,
+                    ],
+                }
+            ],
+            stream=True,
+            stream_options={"include_usage": True},
+        ),
+    )
+    text_buf = ""
+    for chunk in completion:
+        if chunk.choices and getattr(chunk.choices[0].delta, "content", None):
+            text_buf += chunk.choices[0].delta.content
+
+    result = eval_module.normalize_result(
+        eval_module.extract_first_json(text_buf),
+        checklist_type=checklist_type,
+    )
+    result["_resolved_model"] = resolved_model
+    result["_attempted_models"] = attempts
+    result["_input_path"] = str(source_path)
+    output_path = run_dir / f"{sanitize_filename(source_path.stem)}_evaluation.json"
+    write_json(output_path, result)
+    result["_artifact_path"] = str(output_path)
+    return result
+
+
+def compact_production_evaluation(result: dict[str, Any], *, stage: str, checklist_type: str) -> dict[str, Any]:
+    issue_tags: list[str] = []
+    evidence: list[str] = []
+    problem_dimensions: list[str] = []
+    for dim_name, dim_result in (result.get("dimensions") or {}).items():
+        grade = str(dim_result.get("grade") or "")
+        tags = [str(item) for item in (dim_result.get("issue_tags") or []) if str(item).strip()]
+        other_tags = [str(item) for item in (dim_result.get("other_tags") or []) if str(item).strip()]
+        dim_evidence = [str(item) for item in (dim_result.get("evidence") or []) if str(item).strip()]
+        if grade == "Risky" or tags or other_tags:
+            problem_dimensions.append(dim_name)
+        issue_tags.extend(tags)
+        issue_tags.extend(other_tags)
+        evidence.extend(dim_evidence)
+
+    grade = str(result.get("overall_grade") or "Acceptable")
+    unique_tags = list(dict.fromkeys(issue_tags))[:8]
+    unique_evidence = list(dict.fromkeys(evidence))[:5]
+    if grade == "Risky":
+        recommendation = "该图暂不推荐直接使用，建议先按主要问题进入 Edit 修改或重新生成。"
+    elif grade == "Acceptable":
+        recommendation = "该图可继续进入后续流程，但建议留意评估提示中的软性问题。"
+    else:
+        recommendation = "基于当前 checklist 暂未看到明显硬伤，可优先作为候选继续使用。"
+
+    return {
+        "stage": stage,
+        "checklist_type": checklist_type,
+        "overall_grade": grade,
+        "overall_score": result.get("overall_score"),
+        "material_summary": result.get("material_summary") or "",
+        "rationale": result.get("rationale") or "",
+        "problem_dimensions": problem_dimensions[:6],
+        "issue_tags": unique_tags,
+        "evidence": unique_evidence,
+        "recommendation": recommendation,
+        "artifact_path": result.get("_artifact_path") or "",
+        "resolved_model": result.get("_resolved_model") or "",
+        "raw_result": result,
+    }
+
+
+def evaluate_outputs_in_place(
+    modules: dict[str, Any],
+    outputs: list[dict[str, Any]],
+    *,
+    stage: str,
+    checklist_type: str,
+    preferred_model: str | None,
+    output_dir: Path,
+    progress_callback: Any | None = None,
+) -> list[dict[str, Any]]:
+    eval_module = modules["eval"]
+    output_dir.mkdir(parents=True, exist_ok=True)
+    evaluations: list[dict[str, Any]] = []
+
+    def emit(payload: dict[str, Any]) -> None:
+        if callable(progress_callback):
+            progress_callback(payload)
+
+    for idx, output in enumerate(outputs, start=1):
+        image_path = str(output.get("path") or "").strip()
+        if not image_path:
+            continue
+        emit({"stage": "image_evaluation_running", "image_path": image_path, "index": idx})
+        try:
+            raw_result = run_evaluation_for_path(
+                modules,
+                eval_module,
+                image_path,
+                checklist_type=checklist_type,
+                content_text="",
+                preferred_model=preferred_model,
+                output_dir=output_dir,
+            )
+            compact = compact_production_evaluation(raw_result, stage=stage, checklist_type=checklist_type)
+            output["evaluation"] = compact
+            evaluations.append({"path": image_path, "evaluation": compact})
+            emit(
+                {
+                    "stage": "image_evaluated",
+                    "image_path": image_path,
+                    "overall_grade": compact["overall_grade"],
+                    "index": idx,
+                }
+            )
+        except Exception as exc:
+            compact = {
+                "stage": stage,
+                "checklist_type": checklist_type,
+                "overall_grade": "Not evaluated",
+                "overall_score": None,
+                "material_summary": "",
+                "rationale": "",
+                "problem_dimensions": [],
+                "issue_tags": [],
+                "evidence": [],
+                "recommendation": f"评估失败：{exc}",
+                "artifact_path": "",
+                "resolved_model": "",
+                "raw_result": {"error": str(exc)},
+            }
+            output["evaluation"] = compact
+            evaluations.append({"path": image_path, "evaluation": compact})
+            emit({"stage": "image_evaluation_failed", "image_path": image_path, "error": str(exc), "index": idx})
+    write_json(output_dir / f"{stage}_evaluations.json", evaluations)
+    return evaluations
+
+
 def init_dashscope_upload() -> Any:
     try:
         from dashscope import File
@@ -909,6 +1103,7 @@ def run_generation(
     use_case: str = "main_detail",
     audience: str = "电商消费者",
     scene: str = "",
+    key_appliances: list[str] | None = None,
     style: str = "",
     must_have: list[str] | None = None,
     must_avoid: list[str] | None = None,
@@ -923,6 +1118,9 @@ def run_generation(
     preferred_text_model: str = "qwen-plus",
     preferred_image_generation_model: str = "qwen-image-2.0-pro",
     preferred_image_edit_model: str = "qwen-image-edit-max",
+    preferred_evaluation_model: str | None = None,
+    auto_evaluate: bool = True,
+    target_market: str = "",
     progress_callback: Any | None = None,
 ) -> dict[str, Any]:
     if generation_mode == "image_to_background" and not any(grouped_paths.values()):
@@ -961,6 +1159,7 @@ def run_generation(
         use_case=use_case,
         audience=audience.strip() or "电商消费者",
         scene=scene.strip(),
+        key_appliances=key_appliances or [],
         style=style.strip(),
         must_have=must_have or [],
         must_avoid=must_avoid or [],
@@ -977,6 +1176,7 @@ def run_generation(
         variants=int(variants_per_direction),
         aspect_ratio=aspect_ratio,
         background_prompt=background_prompt.strip(),
+        target_market=target_market.strip(),
         output_size=size,
     )
     state = run_state_cls(run_id=run_id, request=request, progress_callback=progress_callback)
@@ -1000,8 +1200,9 @@ def run_generation(
             final_state = run_state_cls.model_validate(final_state)
 
     if not final_state.generated_images and not final_state.selected_image:
-        errors = "\n".join(final_state.errors) if final_state.errors else "模型没有返回图片。"
-        raise RuntimeError(errors)
+        diagnostics = list(final_state.errors) + list(final_state.warnings)
+        message = "\n".join(diagnostics) if diagnostics else "模型没有返回图片。"
+        raise RuntimeError(message)
 
     boards = [
         {"name": board.board_id, "path": board.path, "note": board.note}
@@ -1035,6 +1236,17 @@ def run_generation(
                 "prompt_plan": prompt_plan_by_direction.get(direction.direction_id),
             }
         )
+    evaluations: list[dict[str, Any]] = []
+    if auto_evaluate and outputs:
+        evaluations = evaluate_outputs_in_place(
+            modules,
+            outputs,
+            stage="background",
+            checklist_type=use_case,
+            preferred_model=preferred_evaluation_model,
+            output_dir=workspace_dir / "evaluations" / "background",
+            progress_callback=progress_callback,
+        )
     prompt = final_state.prompt_plans[0].prompt if final_state.prompt_plans else ""
     latest_image = final_state.selected_image or (outputs[0]["path"] if outputs else "")
     return {
@@ -1054,8 +1266,10 @@ def run_generation(
         "prompt": prompt,
         "latest_image": latest_image,
         "selected_image": final_state.selected_image,
+        "evaluations": evaluations,
         "edit_history": [],
         "edit_rounds": [],
+        "component_rounds": [],
         "current_candidates": outputs,
         "current_candidate_groups": direction_groups,
         "latest_batch_id": str(runs_root / run_id),
@@ -1172,6 +1386,117 @@ def render_partial_production_preview(partial_groups: dict[str, dict[str, Any]])
                     st.caption(f"实际模型：{output['resolved_model']}")
 
 
+def render_production_eval_summary(output: dict[str, Any], *, key_prefix: str = "production_eval") -> None:
+    evaluation = output.get("evaluation")
+    if not evaluation:
+        st.caption("评估状态：待评估")
+        return
+    grade = str(evaluation.get("overall_grade") or "Not evaluated")
+    st.markdown(
+        f'<div class="grade-pill {grade_class(grade)}">评估：{grade}</div>',
+        unsafe_allow_html=True,
+    )
+    if evaluation.get("recommendation"):
+        st.caption(str(evaluation["recommendation"]))
+    if evaluation.get("rationale"):
+        st.markdown(str(evaluation["rationale"]))
+    issue_tags = evaluation.get("issue_tags") or []
+    if issue_tags:
+        st.markdown("主要问题")
+        render_chip_list(issue_tags)
+    evidence = evaluation.get("evidence") or []
+    if evidence:
+        with st.expander("查看评估证据", expanded=grade == "Risky"):
+            for item in evidence:
+                st.markdown(f"- {item}")
+    artifact_path = evaluation.get("artifact_path")
+    with st.expander("查看评估 JSON", expanded=False):
+        raw_result = evaluation.get("raw_result") or {}
+        st.json(raw_result)
+        if artifact_path and Path(artifact_path).exists():
+            st.download_button(
+                "下载该图评估 JSON",
+                Path(artifact_path).read_text(encoding="utf-8"),
+                file_name=Path(artifact_path).name,
+                mime="application/json",
+                key=f"{key_prefix}_download_eval_json",
+                use_container_width=True,
+            )
+
+
+def render_candidate_actions(output: dict[str, Any], *, key_prefix: str) -> None:
+    image_path = str(output.get("path") or "")
+    if not image_path or not Path(image_path).exists():
+        return
+    if st.button("设为 Edit Base", key=f"{key_prefix}_set_edit_base", use_container_width=True):
+        set_edit_loop_selected_base(image_path)
+        request_edit_loop_base_source("从最新候选中选择")
+        st.rerun()
+    if st.button("摆放组件", key=f"{key_prefix}_set_component_base", use_container_width=True):
+        st.session_state["component_base_path"] = image_path
+        st.rerun()
+    if st.button("设为最终图", key=f"{key_prefix}_set_final", use_container_width=True):
+        st.session_state["final_output_path"] = image_path
+        st.rerun()
+    st.download_button(
+        "下载图片",
+        Path(image_path).read_bytes(),
+        file_name=Path(image_path).name,
+        mime="image/png",
+        key=f"{key_prefix}_download",
+        use_container_width=True,
+    )
+
+
+def render_candidate_download(output: dict[str, Any], *, key_prefix: str) -> None:
+    image_path = str(output.get("path") or "")
+    if not image_path or not Path(image_path).exists():
+        return
+    st.download_button(
+        "下载图片",
+        Path(image_path).read_bytes(),
+        file_name=Path(image_path).name,
+        mime="image/png",
+        key=f"{key_prefix}_download",
+        use_container_width=True,
+    )
+
+
+def render_candidate_grid(outputs: list[dict[str, Any]], *, key_prefix: str, label_prefix: str) -> None:
+    if not outputs:
+        st.caption("该方向本轮暂无图片结果。若日志里有 429 或模型报错，可重试或切换首选模型。")
+        return
+    cols = st.columns(min(len(outputs), 3))
+    for idx, output in enumerate(outputs):
+        with cols[idx % len(cols)]:
+            label = f"{label_prefix} · 第 {output.get('variant_index', idx + 1)} 张"
+            render_image(output["path"], caption=label)
+            if output.get("resolved_model"):
+                st.caption(f"实际模型：{output['resolved_model']}")
+            item_key = f"{key_prefix}_{idx}"
+            render_production_eval_summary(output, key_prefix=item_key)
+            render_candidate_download(output, key_prefix=item_key)
+
+
+def collect_all_candidate_outputs(result: dict[str, Any]) -> list[dict[str, Any]]:
+    seen: set[str] = set()
+    items: list[dict[str, Any]] = []
+    for container_key in ("current_candidates", "outputs"):
+        for item in result.get(container_key, []) or []:
+            path = str(item.get("path") or "")
+            if path and path not in seen:
+                seen.add(path)
+                items.append(item)
+    for round_key in ("component_rounds", "edit_rounds"):
+        for round_item in result.get(round_key, []) or []:
+            for item in round_item.get("outputs", []) or []:
+                path = str(item.get("path") or "")
+                if path and path not in seen:
+                    seen.add(path)
+                    items.append(item)
+    return items
+
+
 def set_edit_loop_selected_base(path: str) -> None:
     st.session_state["edit_loop_selected_base_path"] = path
 
@@ -1209,6 +1534,8 @@ def ensure_production_result_shape(result: dict[str, Any] | None) -> dict[str, A
     result.setdefault("direction_groups", [])
     result.setdefault("edit_history", [])
     result.setdefault("edit_rounds", [])
+    result.setdefault("component_rounds", [])
+    result.setdefault("evaluations", [])
     result.setdefault("current_candidates", list(result.get("outputs", [])))
     result.setdefault("current_candidate_groups", list(result.get("direction_groups", [])))
     result.setdefault("latest_batch_id", result.get("run_dir") or result.get("workspace_dir"))
@@ -1237,12 +1564,12 @@ def save_uploaded_base_image(uploaded_file: Any, result: dict[str, Any]) -> str:
     return str(path)
 
 
-def save_uploaded_components(uploaded_files: list[Any], result: dict[str, Any]) -> list[str]:
+def save_uploaded_components(uploaded_files: list[Any], result: dict[str, Any], limit: int = 2) -> list[str]:
     edit_root = ensure_edit_workspace(result)
     component_dir = edit_root / "uploaded_components"
     component_dir.mkdir(parents=True, exist_ok=True)
     saved_paths: list[str] = []
-    for uploaded_file in uploaded_files[:2]:
+    for uploaded_file in uploaded_files[:limit]:
         path = component_dir / uploaded_file.name
         path.write_bytes(uploaded_file.getvalue())
         saved_paths.append(str(path))
@@ -1576,6 +1903,8 @@ def run_edit_loop(
     variants_per_direction: int,
     preferred_planner_model: str,
     preferred_image_edit_model: str,
+    preferred_evaluation_model: str | None = None,
+    auto_evaluate: bool = True,
     progress_callback: Any | None = None,
 ) -> dict[str, Any]:
     edit_root = ensure_edit_workspace(result)
@@ -1676,6 +2005,19 @@ def run_edit_loop(
             }
         )
 
+    evaluations: list[dict[str, Any]] = []
+    if auto_evaluate and outputs:
+        checklist_type = str((result.get("task_brief") or {}).get("use_case") or "main_detail")
+        evaluations = evaluate_outputs_in_place(
+            modules,
+            outputs,
+            stage="edit",
+            checklist_type=checklist_type,
+            preferred_model=preferred_evaluation_model,
+            output_dir=round_dir / "evaluations",
+            progress_callback=progress_callback,
+        )
+
     write_json(round_dir / "edit_prompt_plans.json", prompt_plans)
     write_json(
         round_dir / "edit_generation_result.json",
@@ -1684,6 +2026,7 @@ def run_edit_loop(
             "creative_directions": directions,
             "prompt_plans": prompt_plans,
             "outputs": outputs,
+            "evaluations": evaluations,
             "planner_model": planner_model,
         },
     )
@@ -1701,6 +2044,7 @@ def run_edit_loop(
         "outputs": outputs,
         "planner_model": planner_model,
         "planner_attempted_models": planner_attempts,
+        "evaluations": evaluations,
         "component_refs": component_refs,
         "change_request": change_request,
         "lock_request": lock_request,
@@ -1719,6 +2063,183 @@ def run_edit_loop(
     result["current_candidates"] = outputs
     result["current_candidate_groups"] = direction_groups
     result["latest_batch_id"] = batch_id
+    result["latest_image"] = outputs[0]["path"] if outputs else base_image_path
+    return result
+
+
+def build_component_composition_prompt(
+    *,
+    component_specs: list[dict[str, Any]],
+    global_relationship: str,
+    lock_request: str,
+) -> str:
+    component_lines = []
+    for idx, item in enumerate(component_specs, start=1):
+        component_lines.append(
+            "\n".join(
+                [
+                    f"{idx}. 组件名称：{item.get('label') or Path(str(item.get('path', ''))).name}",
+                    f"   组件类型：{item.get('component_type') or '其他'}",
+                    f"   期望位置：{item.get('position') or '由模型判断最合理的位置'}",
+                    f"   关系描述：{item.get('relationship') or '自然放入画面，像真实商业后期合成'}",
+                    f"   允许小幅调整角度：{'是' if item.get('allow_angle_adjustment') else '否'}",
+                ]
+            )
+        )
+    component_block = "\n".join(component_lines)
+    return f"""
+请基于第一张 Base 背景图，参考后续组件图，生成一张完整的南孚商业图。
+
+组件摆放要求：
+{component_block}
+
+整体关系要求：
+{global_relationship.strip() or '组件需要自然融入背景，位置清晰，不遮挡关键画面，整体像可用于电商主图/商详或投放的商业图。'}
+
+必须保持不变：
+{lock_request.strip() or '保留 Base 图的主要空间结构、光线氛围和可用留白。'}
+
+硬性质量要求：
+- 严格保持电池、包装、Logo、文字组件的外观一致性，不要改坏品牌元素。
+- 不要新增其他品牌、伪文字、无关包装或竞品元素。
+- 电池正负极方向必须正确，电池体不能变形。
+- 组件不能遮挡关键画面，整体要像真实商业后期成图。
+- 如果组件是 Logo 或卖点文案，不要重写文字内容，只按参考图呈现。
+""".strip()
+
+
+def run_component_composition(
+    modules: dict[str, Any],
+    result: dict[str, Any],
+    *,
+    base_image_path: str,
+    component_specs: list[dict[str, Any]],
+    global_relationship: str,
+    lock_request: str,
+    variants: int,
+    preferred_image_edit_model: str,
+    preferred_evaluation_model: str | None = None,
+    progress_callback: Any | None = None,
+) -> dict[str, Any]:
+    if not component_specs:
+        raise RuntimeError("请至少上传一个组件。")
+    if not base_image_path or not Path(base_image_path).exists():
+        raise RuntimeError("请先选择有效的 Base 图。")
+
+    edit_root = ensure_edit_workspace(result)
+    round_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+    round_dir = edit_root / f"component_round_{round_id}"
+    outputs_dir = round_dir / "outputs"
+    outputs_dir.mkdir(parents=True, exist_ok=True)
+
+    def emit(payload: dict[str, Any]) -> None:
+        if callable(progress_callback):
+            progress_callback(payload)
+
+    emit({"stage": "component_composition_running", "message": "正在准备组件成图。"})
+    prompt = build_component_composition_prompt(
+        component_specs=component_specs,
+        global_relationship=global_relationship,
+        lock_request=lock_request,
+    )
+    prompt_plan = {
+        "direction_id": "component_composition",
+        "direction_title": "组件成图",
+        "prompt": prompt,
+        "sections": {
+            "组件 JSON": json.dumps(component_specs, ensure_ascii=False, indent=2),
+            "整体关系要求": global_relationship.strip(),
+            "需要保持不变": lock_request.strip(),
+        },
+        "preferred_model": preferred_image_edit_model,
+    }
+    write_json(round_dir / "component_specs.json", component_specs)
+    write_json(round_dir / "component_prompt_plan.json", prompt_plan)
+
+    edit_client = modules["QwenImageEditClient"]()
+    if not edit_client.is_enabled():
+        raise RuntimeError("DASHSCOPE_API_KEY 未配置，无法调用编辑模型。")
+
+    reference_paths = [str(item["path"]) for item in component_specs if item.get("path")]
+    outputs: list[dict[str, Any]] = []
+    direction = {
+        "direction_id": "component_composition",
+        "title": "组件成图",
+        "summary": "基于已选 Base 背景与上传组件生成最终商业图。",
+        "risk_points": ["品牌元素可能被模型改形", "组件可能遮挡关键画面"],
+        "recommendation_reason": "用于模式一 Step 7/8：组件摆放后立即进入二次评估。",
+    }
+    for variant_index in range(1, max(1, int(variants)) + 1):
+        output_path = outputs_dir / f"component_composition_variant_{variant_index:02d}.png"
+        edit_result = edit_client.retouch(
+            image_path=base_image_path,
+            instruction=prompt,
+            output_path=str(output_path),
+            reference_images=reference_paths,
+            preferred_model=preferred_image_edit_model,
+        )
+        output = {
+            "index": str(variant_index),
+            "path": edit_result["path"],
+            "source_url": edit_result.get("source_url"),
+            "direction_id": "component_composition",
+            "direction_title": "组件成图",
+            "variant_index": variant_index,
+            "resolved_model": edit_result.get("model"),
+            "attempted_models": edit_result.get("attempted_models", []),
+            "prompt": prompt,
+            "component_specs": component_specs,
+        }
+        outputs.append(output)
+        emit(
+            {
+                "stage": "component_image_generated",
+                "direction_id": "component_composition",
+                "direction_title": "组件成图",
+                "variant_index": variant_index,
+                "path": edit_result["path"],
+                "resolved_model": edit_result.get("model"),
+            }
+        )
+
+    checklist_type = str((result.get("task_brief") or {}).get("use_case") or "main_detail")
+    evaluations = evaluate_outputs_in_place(
+        modules,
+        outputs,
+        stage="component",
+        checklist_type=checklist_type,
+        preferred_model=preferred_evaluation_model,
+        output_dir=round_dir / "evaluations",
+        progress_callback=progress_callback,
+    )
+    direction_group = {"direction": direction, "outputs": outputs, "prompt_plan": prompt_plan}
+    write_json(
+        round_dir / "component_generation_result.json",
+        {
+            "base_image_path": base_image_path,
+            "component_specs": component_specs,
+            "prompt_plan": prompt_plan,
+            "outputs": outputs,
+            "evaluations": evaluations,
+        },
+    )
+    emit({"stage": "component_composition_completed", "generated_count": len(outputs)})
+
+    round_record = {
+        "round_id": round_id,
+        "batch_id": f"component_round_{round_id}",
+        "base_image_path": base_image_path,
+        "component_specs": component_specs,
+        "prompt_plan": prompt_plan,
+        "direction_groups": [direction_group],
+        "outputs": outputs,
+        "evaluations": evaluations,
+        "run_dir": str(round_dir),
+    }
+    result.setdefault("component_rounds", []).append(round_record)
+    result["current_candidates"] = outputs
+    result["current_candidate_groups"] = [direction_group]
+    result["latest_batch_id"] = round_record["batch_id"]
     result["latest_image"] = outputs[0]["path"] if outputs else base_image_path
     return result
 
@@ -1925,6 +2446,7 @@ def render_production_page(modules: dict[str, Any]) -> None:
         use_case = "main_detail"
         audience = "电商消费者"
         scene = ""
+        key_appliances: list[str] = []
         style = ""
         must_avoid: list[str] = []
         selling_points: list[str] = []
@@ -1932,6 +2454,7 @@ def render_production_page(modules: dict[str, Any]) -> None:
         realism_level = "realistic"
         brand_tone_priority = ["reliable", "warm", "professional"]
         visual_density = "medium"
+        target_market = ""
         direction_count = 3
         variants_per_direction = 2
         aspect_ratio = "1:1"
@@ -1939,6 +2462,13 @@ def render_production_page(modules: dict[str, Any]) -> None:
         preferred_text_model = modules["get_default_model"]("text_chat")
         preferred_image_generation_model = modules["get_default_model"]("image_generation")
         preferred_image_edit_model = modules["get_default_model"]("image_edit")
+        preferred_evaluation_model = render_model_selectbox(
+            modules,
+            family="vision_chat",
+            label="自动评估首选模型",
+            key="prod_preferred_evaluation_model",
+            default_model=getattr(modules["eval"], "MODEL_NAME", modules["get_default_model"]("vision_chat")),
+        )
         if is_image_mode:
             preferred_image_edit_model = render_model_selectbox(
                 modules,
@@ -1985,16 +2515,38 @@ def render_production_page(modules: dict[str, Any]) -> None:
                 key="prod_use_case",
             )
             use_case = "main_detail" if use_case_label == "主图/商详" else "media_ad"
-            audience = st.text_input(
+            tag_options = load_material_tag_options()
+            audience_options = tag_options.get("人群", [])
+            scene_options = tag_options.get("场景", [])
+            audience_default = audience_options.index("家庭守护者") if "家庭守护者" in audience_options else 0
+            scene_default = scene_options.index("家居日用") if "家居日用" in scene_options else 0
+            audience = st.selectbox(
                 "目标群体",
-                value="年轻家庭",
+                options=audience_options,
+                index=audience_default,
                 key="prod_audience",
             )
-            scene = st.text_input(
+            scene = st.selectbox(
                 "场景",
-                value="冬季居家夜间收纳场景",
+                options=scene_options,
+                index=scene_default,
                 key="prod_scene",
             )
+            appliance_options = ["遥控器", "鼠标", "智能门锁", "儿童玩具", "手电筒", "燃气灶", "剃须刀", "血压计", "键盘", "游戏手柄"]
+            selected_appliances = st.multiselect(
+                "关键用电器",
+                options=appliance_options,
+                default=["遥控器"],
+                key="prod_key_appliances",
+            )
+            custom_appliances = parse_multiline_list(
+                st.text_input(
+                    "其他关键用电器",
+                    placeholder="可选，例如：门铃、麦克风、拍立得；多个可用逗号分隔",
+                    key="prod_custom_key_appliances",
+                )
+            )
+            key_appliances = list(dict.fromkeys(selected_appliances + custom_appliances))
             style = st.text_input(
                 "风格描述",
                 value="高级写实，暖色照明",
@@ -2039,17 +2591,6 @@ def render_production_page(modules: dict[str, Any]) -> None:
                 value=True,
                 key="prod_reserve_component_space",
             )
-            realism_label = st.selectbox(
-                "真实感程度",
-                options=["写实", "半写实", "偏概念"],
-                index=0,
-                key="prod_realism_level",
-            )
-            realism_level = {
-                "写实": "realistic",
-                "半写实": "semi_realistic",
-                "偏概念": "conceptual",
-            }[realism_label]
             visual_density_label = st.selectbox(
                 "视觉密度",
                 options=["低", "中", "高"],
@@ -2071,6 +2612,13 @@ def render_production_page(modules: dict[str, Any]) -> None:
                 "年轻": "young",
             }
             brand_tone_priority = [tone_map[item] for item in tone_labels] or ["reliable", "warm", "professional"]
+            target_market = st.selectbox(
+                "目标国家/市场",
+                options=["不指定", "中国", "俄罗斯", "越南"],
+                index=0,
+                key="prod_target_market",
+            )
+            target_market = "" if target_market == "不指定" else target_market
             must_avoid = parse_multiline_list(
                 st.text_area(
                     "禁忌元素",
@@ -2088,6 +2636,8 @@ def render_production_page(modules: dict[str, Any]) -> None:
                 )
             )
             must_have = []
+            if key_appliances:
+                must_have.append("关键用电器：" + "、".join(key_appliances))
             if reserve_component_space:
                 must_have.append("留出干净区域供后续摆放组件")
         if is_image_mode:
@@ -2122,8 +2672,8 @@ def render_production_page(modules: dict[str, Any]) -> None:
         if st.button(button_label, type="primary", use_container_width=True, key="prod_generate"):
             if is_image_mode and not bg_files:
                 st.error("请至少上传一张成品参考图。")
-            elif not is_image_mode and (not audience.strip() or not scene.strip()):
-                st.error("请至少填写目标群体和场景。")
+            elif not is_image_mode and (not audience.strip() or not scene.strip() or not key_appliances):
+                st.error("请至少选择目标群体、场景和关键用电器。")
             else:
                 spinner_text = "正在提取背景..." if is_image_mode else "正在生成背景..."
                 with st.spinner(spinner_text):
@@ -2164,6 +2714,14 @@ def render_production_page(modules: dict[str, Any]) -> None:
                                 progress_status.success(
                                     f"生成完成，共产出 {event.get('generated_count', 0)} 张结果。"
                                 )
+                            elif stage == "image_evaluation_running":
+                                progress_status.info(f"正在评估第 {event.get('index')} 张图片。")
+                            elif stage == "image_evaluated":
+                                progress_status.info(
+                                    f"第 {event.get('index')} 张评估完成：{event.get('overall_grade')}"
+                                )
+                            elif stage == "image_evaluation_failed":
+                                progress_status.warning(f"第 {event.get('index')} 张评估失败：{event.get('error')}")
 
                         run_dir = make_run_dir("production_inputs")
                         grouped_paths = {
@@ -2178,6 +2736,7 @@ def render_production_page(modules: dict[str, Any]) -> None:
                             use_case=use_case,
                             audience=audience,
                             scene=scene,
+                            key_appliances=key_appliances,
                             style=style,
                             must_have=must_have,
                             must_avoid=must_avoid,
@@ -2192,6 +2751,9 @@ def render_production_page(modules: dict[str, Any]) -> None:
                             preferred_text_model=preferred_text_model,
                             preferred_image_generation_model=preferred_image_generation_model,
                             preferred_image_edit_model=preferred_image_edit_model,
+                            preferred_evaluation_model=preferred_evaluation_model,
+                            auto_evaluate=True,
+                            target_market=target_market,
                             progress_callback=_progress,
                         )
                         st.session_state["production_result"] = result
@@ -2260,28 +2822,12 @@ def render_production_page(modules: dict[str, Any]) -> None:
                             st.caption("场景元素：" + "、".join(elements))
 
                 outputs = group.get("outputs") or []
-                if outputs:
-                    image_cols = st.columns(min(len(outputs), 3))
-                    for idx, output in enumerate(outputs):
-                        label = (
-                            f"提取结果 · 第 {output['variant_index']} 张"
-                            if is_extraction_group
-                            else f"{direction['title']} · 第 {output['variant_index']} 张"
-                        )
-                        with image_cols[idx % len(image_cols)]:
-                            render_image(output["path"], caption=label)
-                            if output.get("resolved_model"):
-                                st.caption(f"实际模型：{output['resolved_model']}")
-                            st.download_button(
-                                f"下载 {direction['direction_id']}_{output['variant_index']}",
-                                Path(output["path"]).read_bytes(),
-                                file_name=Path(output["path"]).name,
-                                mime="image/png",
-                                key=f"download_output_{direction['direction_id']}_{idx}",
-                                use_container_width=True,
-                            )
-                else:
-                    st.caption("该方向本轮暂无图片结果。若日志里有 429 或模型报错，可重试或切换首选模型。")
+                label_prefix = "提取结果" if is_extraction_group else direction["title"]
+                render_candidate_grid(
+                    outputs,
+                    key_prefix=f"production_{direction.get('direction_id', group_idx)}",
+                    label_prefix=label_prefix,
+                )
                 prompt_plan = group.get("prompt_plan")
                 if prompt_plan:
                     expander_title = (
@@ -2297,23 +2843,14 @@ def render_production_page(modules: dict[str, Any]) -> None:
                         st.markdown("**完整 Prompt**")
                         st.code(prompt_plan.get("prompt", ""), language="text")
         else:
-            image_cols = st.columns(min(len(result["outputs"]), 3))
-            for idx, output in enumerate(result["outputs"]):
-                with image_cols[idx % len(image_cols)]:
-                    render_image(output["path"], caption=f"候选 {idx + 1}")
-                    st.download_button(
-                        f"下载候选 {idx + 1}",
-                        Path(output["path"]).read_bytes(),
-                        file_name=Path(output["path"]).name,
-                        mime="image/png",
-                        key=f"download_output_{idx}",
-                        use_container_width=True,
-                    )
+            render_candidate_grid(result["outputs"], key_prefix="production_flat", label_prefix="候选")
 
         with st.expander("可选：文字图片生成器", expanded=False):
             render_text_generator_page(modules, embedded=True)
 
     render_edit_loop_section(modules, result)
+    render_component_composition_section(modules, result)
+    render_final_output_section(modules, result)
     render_hd_redraw_section(modules)
 
 
@@ -2423,41 +2960,12 @@ def render_manual_compression_section() -> None:
 
 def render_edit_loop_section(modules: dict[str, Any], result: dict[str, Any]) -> None:
     result = ensure_production_result_shape(result)
-    st.markdown("#### Edit Loop")
+    st.markdown("#### 背景图修改")
 
     current_candidates = result.get("current_candidates") or []
-    current_candidate_groups = result.get("current_candidate_groups") or []
     pending_base_source = st.session_state.pop("_pending_edit_loop_base_source", None)
     if pending_base_source:
         st.session_state["edit_loop_base_source"] = pending_base_source
-    if current_candidate_groups:
-        st.caption("当前最新候选批次。下一轮 Edit 默认会基于这一批图片继续生成。")
-        for group in current_candidate_groups:
-            direction = group.get("direction") or {}
-            title = direction.get("title") or "最新方向"
-            st.markdown(f"##### 当前候选 · {title}")
-            outputs = group.get("outputs") or []
-            if outputs:
-                cols = st.columns(min(len(outputs), 3))
-                for idx, output in enumerate(outputs):
-                    with cols[idx % len(cols)]:
-                        render_image(output["path"], caption=f"{title} · 第 {output.get('variant_index', idx + 1)} 张")
-                        if st.button(
-                            "设为下一轮 Base",
-                            key=f"set_next_base_{title}_{idx}_{Path(output['path']).name}",
-                            use_container_width=True,
-                        ):
-                            set_edit_loop_selected_base(output["path"])
-                            request_edit_loop_base_source("从最新候选中选择")
-                            st.rerun()
-                        st.download_button(
-                            f"下载当前候选 {title}_{idx + 1}",
-                            Path(output["path"]).read_bytes(),
-                            file_name=Path(output["path"]).name,
-                            mime="image/png",
-                            key=f"download_current_candidate_{title}_{idx}",
-                            use_container_width=True,
-                        )
 
     selected_base_path = str(st.session_state.get("edit_loop_selected_base_path") or "").strip()
     has_selected_history_base = bool(
@@ -2485,19 +2993,22 @@ def render_edit_loop_section(modules: dict[str, Any], result: dict[str, Any]) ->
                 else f"候选 {idx}"
             )
             output_options[label] = output["path"]
+        labels = list(output_options.keys())
         selected_base_path = st.session_state.get("edit_loop_selected_base_path")
         default_label = next(
             (label for label, path in output_options.items() if path == selected_base_path),
-            list(output_options.keys())[0],
+            labels[0],
         )
         current_radio_value = st.session_state.get("edit_loop_base_candidate")
-        if current_radio_value not in output_options or output_options.get(str(current_radio_value)) != output_options[default_label]:
+        if current_radio_value in output_options:
+            default_label = str(current_radio_value)
+        elif current_radio_value is not None:
             st.session_state["edit_loop_base_candidate"] = default_label
         base_label = st.radio(
             "选择一张最新候选图作为 Base",
-            options=list(output_options.keys()),
+            options=labels,
             horizontal=True,
-            index=list(output_options.keys()).index(default_label),
+            index=labels.index(default_label),
             key="edit_loop_base_candidate",
         )
         base_image_path = output_options[base_label]
@@ -2533,55 +3044,26 @@ def render_edit_loop_section(modules: dict[str, Any], result: dict[str, Any]) ->
         st.caption(f"文件：{Path(base_image_path).name}")
         render_image(base_image_path, caption="下一轮 Edit 将基于这张图")
 
-    uploaded_components = st.file_uploader(
-        "上传要加入的 Components（最多 2 个）",
-        type=["png", "jpg", "jpeg", "webp", "bmp"],
-        accept_multiple_files=True,
-        key=uploader_key("edit_loop_components_upload"),
-    )
-    if st.button("清空已上传 Components", key="edit_loop_clear_components_upload", use_container_width=False):
-        reset_uploader(
-            "edit_loop_components_upload",
-            state_keys_to_clear=[key for key in list(st.session_state.keys()) if key.startswith("edit_component_position_")],
-        )
-        st.rerun()
     component_refs: list[dict[str, str]] = []
-    saved_component_paths: list[str] = []
-    if uploaded_components:
-        if len(uploaded_components) > 2:
-            st.warning("当前最多只支持 2 个 component，系统将只使用前 2 个。")
-        saved_component_paths = save_uploaded_components(list(uploaded_components), result)
-        preview_cols = st.columns(min(len(saved_component_paths), 2))
-        for idx, path in enumerate(saved_component_paths):
-            with preview_cols[idx % len(preview_cols)]:
-                render_image(path, caption=f"Component {idx + 1}")
-    for idx, path in enumerate(saved_component_paths, start=1):
-        label = Path(path).name
-        position = st.text_input(
-            f"{label} 的期望位置",
-            placeholder="例如：右下角、靠中间偏右、左上角小角标",
-            key=f"edit_component_position_{idx}",
-        )
-        component_refs.append(
-            {
-                "label": label,
-                "path": path,
-                "group": "uploaded_component",
-                "position": position.strip(),
-            }
-        )
+    st.caption("这里只处理背景图修改；需要加入电池、Logo、包装等组件时，请使用下方「摆放组件并二次评估」。")
 
     change_request = st.text_area(
-        "要变的地方",
-        placeholder="例如：背景更暖一些；让画面更像真实家居夜景；加入电池体并放在右下角。",
+        "需要修改的内容",
+        placeholder="例如：背景更暖一些；减少杂物；右下角留白更多；让画面更像真实家居夜景。",
         key="edit_loop_change_request",
         height=120,
     )
     lock_request = st.text_area(
-        "要不变的地方",
+        "保持不变的内容",
         placeholder="例如：整体留白结构不要变；不要出现文字和 Logo；原图的暖色灯光氛围要保留。",
         key="edit_loop_lock_request",
         height=120,
+    )
+    edit_intensity = st.radio(
+        "修改强度",
+        options=["小幅修改", "大幅重做"],
+        horizontal=True,
+        key="edit_loop_intensity",
     )
     col_a, col_b = st.columns(2)
     with col_a:
@@ -2592,25 +3074,32 @@ def render_edit_loop_section(modules: dict[str, Any], result: dict[str, Any]) ->
     planner_model = render_model_selectbox(
         modules,
         family="vision_chat",
-        label="Edit 规划首选模型",
+        label="背景修改规划模型",
         key="edit_loop_planner_model",
         default_model=modules["get_default_model"]("vision_chat"),
     )
     edit_image_model = render_model_selectbox(
         modules,
         family="image_edit",
-        label="Edit 生图首选模型",
+        label="背景修改生图模型",
         key="edit_loop_image_model",
         default_model=result.get("preferred_models", {}).get("image_edit") or modules["get_default_model"]("image_edit"),
+    )
+    edit_eval_model = render_model_selectbox(
+        modules,
+        family="vision_chat",
+        label="修改后自动评估模型",
+        key="edit_loop_evaluation_model",
+        default_model=getattr(modules["eval"], "MODEL_NAME", modules["get_default_model"]("vision_chat")),
     )
 
     progress_status = st.empty()
     progress_preview = st.empty()
-    if st.button("执行 Edit Loop", use_container_width=True, key="edit_loop_submit"):
+    if st.button("执行背景图修改", use_container_width=True, key="edit_loop_submit"):
         if not base_image_path:
             st.error("请先选择或上传一张 Base 图。")
-        elif not change_request.strip() and not component_refs:
-            st.error("请至少填写“要变的地方”，或选择一个 component。")
+        elif not change_request.strip():
+            st.error("请填写需要修改的内容。")
         else:
             try:
                 partial_groups: dict[str, dict[str, Any]] = {}
@@ -2640,20 +3129,29 @@ def render_edit_loop_section(modules: dict[str, Any], result: dict[str, Any]) ->
                         )
                         with progress_preview.container():
                             render_partial_production_preview(partial_groups)
+                    elif stage == "image_evaluation_running":
+                        progress_status.info(f"正在评估 Edit 结果第 {event.get('index')} 张。")
+                    elif stage == "image_evaluated":
+                        progress_status.info(f"Edit 结果第 {event.get('index')} 张评估完成：{event.get('overall_grade')}")
+                    elif stage == "image_evaluation_failed":
+                        progress_status.warning(f"Edit 结果第 {event.get('index')} 张评估失败：{event.get('error')}")
                     elif stage == "edit_loop_completed":
                         progress_status.success(f"Edit 完成，共产出 {event.get('generated_count', 0)} 张。")
 
+                effective_change_request = f"{edit_intensity}：{change_request.strip()}"
                 updated = run_edit_loop(
                     modules,
                     result,
                     base_image_path=base_image_path,
                     component_refs=component_refs,
-                    change_request=change_request,
+                    change_request=effective_change_request,
                     lock_request=lock_request,
                     direction_count=int(edit_direction_count),
                     variants_per_direction=int(edit_variants_per_direction),
                     preferred_planner_model=planner_model,
                     preferred_image_edit_model=edit_image_model,
+                    preferred_evaluation_model=edit_eval_model,
+                    auto_evaluate=True,
                     progress_callback=_progress,
                 )
                 updated.setdefault("preferred_models", {})
@@ -2680,7 +3178,7 @@ def render_edit_loop_section(modules: dict[str, Any], result: dict[str, Any]) ->
         )
 
     if result.get("edit_rounds"):
-        st.markdown("#### Edit 历史轮次")
+        st.markdown("#### 背景图修改历史")
         for round_idx, round_item in enumerate(reversed(result["edit_rounds"]), start=1):
             title = f"第 {len(result['edit_rounds']) - round_idx + 1} 轮 Edit"
             with st.expander(title, expanded=False):
@@ -2701,26 +3199,308 @@ def render_edit_loop_section(modules: dict[str, Any], result: dict[str, Any]) ->
                     direction = group.get("direction") or {}
                     st.markdown(f"**{direction.get('title', 'Edit 方向')}**")
                     outputs = group.get("outputs") or []
-                    cols = st.columns(min(len(outputs), 3)) if outputs else []
-                    for idx, output in enumerate(outputs):
-                        with cols[idx % len(cols)]:
-                            render_image(output["path"], caption=f"第 {output.get('variant_index', idx + 1)} 张")
-                            if st.button(
-                                "设为下一轮 Base",
-                                key=f"set_history_base_{round_item['round_id']}_{direction.get('direction_id', 'edit')}_{idx}",
-                                use_container_width=True,
-                            ):
-                                set_edit_loop_selected_base(output["path"])
-                                request_edit_loop_base_source("使用已选历史图片")
-                                st.rerun()
-                            st.download_button(
-                                f"下载历史 {direction.get('direction_id', 'edit')}_{idx}",
-                                Path(output["path"]).read_bytes(),
-                                file_name=Path(output["path"]).name,
-                                mime="image/png",
-                                key=f"download_edit_history_{round_item['round_id']}_{direction.get('direction_id', 'edit')}_{idx}",
-                                use_container_width=True,
+                    render_candidate_grid(
+                        outputs,
+                        key_prefix=f"edit_history_{round_item['round_id']}_{direction.get('direction_id', 'edit')}",
+                        label_prefix=str(direction.get("title") or "Edit 结果"),
                             )
+
+
+def render_component_composition_section(modules: dict[str, Any], result: dict[str, Any]) -> None:
+    result = ensure_production_result_shape(result)
+    st.markdown("---")
+    st.markdown("#### 摆放组件并二次评估")
+    st.caption("上传电池、包装、Logo、卖点文案或人物组件，系统会基于选中的 Base 图生成组件成图，并自动进入二次评估。")
+
+    candidates = collect_all_candidate_outputs(result)
+    selected_base = str(st.session_state.get("component_base_path") or result.get("latest_image") or "").strip()
+    base_image_path = ""
+    if candidates:
+        options: dict[str, str] = {}
+        for idx, item in enumerate(candidates, start=1):
+            label = f"{item.get('direction_title') or '候选'} · 第 {item.get('variant_index', idx)} 张 · {Path(item.get('path', '')).name}"
+            options[label] = str(item["path"])
+        default_label = next((label for label, path in options.items() if path == selected_base), list(options.keys())[0])
+        chosen_label = st.radio(
+            "选择 Base 图",
+            options=list(options.keys()),
+            index=list(options.keys()).index(default_label),
+            key="component_base_candidate",
+        )
+        base_image_path = options[chosen_label]
+        st.session_state["component_base_path"] = base_image_path
+        render_image(base_image_path, caption="组件成图 Base")
+    else:
+        uploaded_base = st.file_uploader(
+            "当前没有候选图，可直接上传 Base 图",
+            type=SUPPORTED_IMAGE_UPLOAD_TYPES,
+            key=uploader_key("component_upload_base"),
+        )
+        if uploaded_base:
+            base_image_path = save_uploaded_base_image(uploaded_base, result)
+            st.session_state["production_result"] = result
+            st.session_state["component_base_path"] = base_image_path
+            render_image(base_image_path, caption="上传的组件成图 Base")
+
+    uploaded_components = st.file_uploader(
+        "上传组件（最多 4 个）",
+        type=SUPPORTED_IMAGE_UPLOAD_TYPES,
+        accept_multiple_files=True,
+        key=uploader_key("component_composition_uploads"),
+    )
+    if st.button("清空组件上传", key="component_composition_clear", use_container_width=False):
+        reset_uploader(
+            "component_composition_uploads",
+            state_keys_to_clear=[key for key in list(st.session_state.keys()) if key.startswith("component_spec_")],
+        )
+        st.rerun()
+
+    component_specs: list[dict[str, Any]] = []
+    saved_paths: list[str] = []
+    if uploaded_components:
+        if len(uploaded_components) > 4:
+            st.warning("当前最多使用 4 个组件，系统会忽略第 5 个及之后的文件。")
+        saved_paths = save_uploaded_components(list(uploaded_components), result, limit=4)
+        preview_cols = st.columns(min(len(saved_paths), 4))
+        for idx, path in enumerate(saved_paths):
+            with preview_cols[idx % len(preview_cols)]:
+                render_image(path, caption=f"Component {idx + 1}")
+
+    type_options = ["电池体", "产品包装", "Logo", "卖点文案", "人物", "其他"]
+    for idx, path in enumerate(saved_paths, start=1):
+        label = Path(path).name
+        st.markdown(f"**组件 {idx}：{label}**")
+        col_a, col_b = st.columns(2)
+        with col_a:
+            component_type = st.selectbox(
+                "组件类型",
+                options=type_options,
+                key=f"component_spec_type_{idx}_{sanitize_filename(label)}",
+            )
+            position = st.text_input(
+                "期望位置",
+                placeholder="例如：右下角、靠中间偏右、左上角小角标",
+                key=f"component_spec_position_{idx}_{sanitize_filename(label)}",
+            )
+        with col_b:
+            relationship = st.text_input(
+                "组件与背景关系描述",
+                placeholder="例如：电池放在桌面前景，Logo 保持在右上角，不遮挡留白。",
+                key=f"component_spec_relationship_{idx}_{sanitize_filename(label)}",
+            )
+            allow_angle = st.checkbox(
+                "允许模型小幅调整角度",
+                value=True,
+                key=f"component_spec_angle_{idx}_{sanitize_filename(label)}",
+            )
+        component_specs.append(
+            {
+                "label": label,
+                "path": path,
+                "component_type": component_type,
+                "position": position.strip(),
+                "relationship": relationship.strip(),
+                "allow_angle_adjustment": bool(allow_angle),
+            }
+        )
+
+    global_relationship = st.text_area(
+        "整体摆放要求",
+        placeholder="例如：整体像电商商详头图，组件集中在右下角，左侧保持干净留白。",
+        key="component_global_relationship",
+        height=90,
+    )
+    lock_request = st.text_area(
+        "保持不变的内容",
+        placeholder="例如：保留背景光线和空间结构，不要新增文字，不要改变原背景氛围。",
+        key="component_lock_request",
+        height=90,
+    )
+    col_a, col_b, col_c = st.columns(3)
+    with col_a:
+        variants = st.slider("组件成图张数", 1, 4, 2, key="component_variants")
+    with col_b:
+        component_model = render_model_selectbox(
+            modules,
+            family="image_edit",
+            label="组件成图模型",
+            key="component_image_model",
+            default_model=result.get("preferred_models", {}).get("image_edit") or modules["get_default_model"]("image_edit"),
+        )
+    with col_c:
+        component_eval_model = render_model_selectbox(
+            modules,
+            family="vision_chat",
+            label="二次评估模型",
+            key="component_eval_model",
+            default_model=getattr(modules["eval"], "MODEL_NAME", modules["get_default_model"]("vision_chat")),
+        )
+
+    progress_status = st.empty()
+    progress_preview = st.empty()
+    if st.button("执行组件成图", key="component_compose_submit", type="primary", use_container_width=True):
+        if not base_image_path:
+            st.error("请先选择或上传 Base 图。")
+        elif not component_specs:
+            st.error("请至少上传一个组件。")
+        else:
+            try:
+                partial_groups: dict[str, dict[str, Any]] = {}
+
+                def _progress(event: dict[str, Any]) -> None:
+                    stage = event.get("stage")
+                    if stage == "component_composition_running":
+                        progress_status.info("正在准备组件成图。")
+                    elif stage == "component_image_generated":
+                        direction_id = str(event.get("direction_id") or "component_composition")
+                        group = partial_groups.setdefault(direction_id, {"title": "组件成图", "outputs": []})
+                        group["outputs"].append(
+                            {
+                                "path": event.get("path"),
+                                "variant_index": event.get("variant_index"),
+                                "resolved_model": event.get("resolved_model"),
+                            }
+                        )
+                        progress_status.info(f"已生成组件成图第 {event.get('variant_index')} 张。")
+                        with progress_preview.container():
+                            render_partial_production_preview(partial_groups)
+                    elif stage == "image_evaluation_running":
+                        progress_status.info(f"正在二次评估第 {event.get('index')} 张组件成图。")
+                    elif stage == "image_evaluated":
+                        progress_status.info(f"组件成图第 {event.get('index')} 张评估完成：{event.get('overall_grade')}")
+                    elif stage == "image_evaluation_failed":
+                        progress_status.warning(f"组件成图第 {event.get('index')} 张评估失败：{event.get('error')}")
+                    elif stage == "component_composition_completed":
+                        progress_status.success(f"组件成图完成，共产出 {event.get('generated_count', 0)} 张。")
+
+                updated = run_component_composition(
+                    modules,
+                    result,
+                    base_image_path=base_image_path,
+                    component_specs=component_specs,
+                    global_relationship=global_relationship,
+                    lock_request=lock_request,
+                    variants=int(variants),
+                    preferred_image_edit_model=component_model,
+                    preferred_evaluation_model=component_eval_model,
+                    progress_callback=_progress,
+                )
+                updated.setdefault("preferred_models", {})
+                updated["preferred_models"]["image_edit"] = component_model
+                st.session_state["production_result"] = updated
+                if updated.get("latest_image"):
+                    st.session_state["final_output_path"] = updated["latest_image"]
+                st.session_state.pop("production_error", None)
+                result = updated
+            except Exception as exc:
+                st.session_state["production_error"] = str(exc)
+                st.error(str(exc))
+
+    if result.get("component_rounds"):
+        st.markdown("#### 组件成图历史")
+        for round_idx, round_item in enumerate(reversed(result["component_rounds"]), start=1):
+            title = f"第 {len(result['component_rounds']) - round_idx + 1} 轮组件成图"
+            with st.expander(title, expanded=False):
+                st.caption(f"Base：{Path(round_item.get('base_image_path', '')).name}")
+                if round_item.get("component_specs"):
+                    st.json(round_item["component_specs"])
+                for group in round_item.get("direction_groups", []):
+                    render_candidate_grid(
+                        group.get("outputs") or [],
+                        key_prefix=f"component_history_{round_item['round_id']}",
+                        label_prefix="组件成图",
+                    )
+
+
+def render_final_output_section(modules: dict[str, Any], result: dict[str, Any]) -> None:
+    result = ensure_production_result_shape(result)
+    candidates = collect_all_candidate_outputs(result)
+    st.markdown("---")
+    st.markdown("#### 输出最终文件")
+    if not candidates:
+        st.caption("当前还没有可输出的候选图。")
+        return
+
+    path_to_output = {str(item.get("path") or ""): item for item in candidates if item.get("path")}
+    selected_path = str(st.session_state.get("final_output_path") or result.get("latest_image") or candidates[0]["path"])
+    if selected_path not in path_to_output:
+        selected_path = str(candidates[0]["path"])
+    labels = {
+        f"{item.get('direction_title') or '候选'} · 第 {item.get('variant_index', idx)} 张 · {Path(item.get('path', '')).name}": str(item["path"])
+        for idx, item in enumerate(candidates, start=1)
+    }
+    default_label = next((label for label, path in labels.items() if path == selected_path), list(labels.keys())[0])
+    chosen_label = st.selectbox(
+        "选择最终图",
+        options=list(labels.keys()),
+        index=list(labels.keys()).index(default_label),
+        key="final_output_select",
+    )
+    final_path = labels[chosen_label]
+    st.session_state["final_output_path"] = final_path
+    final_output = path_to_output[final_path]
+    render_image(final_path, caption="最终输出预览")
+    render_production_eval_summary(final_output, key_prefix="final_output")
+
+    col_a, col_b = st.columns(2)
+    with col_a:
+        st.download_button(
+            "下载 PNG 原图",
+            Path(final_path).read_bytes(),
+            file_name=Path(final_path).name,
+            mime="image/png",
+            key="final_download_png",
+            use_container_width=True,
+        )
+    with col_b:
+        compressed_dir = Path(result.get("workspace_dir") or get_session_workspace_dir()) / "final_outputs"
+        if st.button("生成 JPG 压缩版", key="final_make_jpg", use_container_width=True):
+            try:
+                compressed = compress_image_with_options(
+                    final_path,
+                    compressed_dir,
+                    max_side=1600,
+                    jpeg_quality=88,
+                    output_format="JPEG",
+                )
+                st.session_state["final_compressed_result"] = compressed
+            except Exception as exc:
+                st.error(f"压缩失败：{exc}")
+
+    compressed = st.session_state.get("final_compressed_result")
+    if compressed and Path(compressed.get("path", "")).exists():
+        st.caption(
+            f"压缩版：{compressed['width']}×{compressed['height']} | {format_file_size(compressed['size_bytes'])}"
+        )
+        st.download_button(
+            "下载 JPG 压缩版",
+            Path(compressed["path"]).read_bytes(),
+            file_name=compressed["name"],
+            mime=compressed["mime"],
+            key="final_download_jpg",
+            use_container_width=False,
+        )
+
+    provenance = {
+        "final_image": final_path,
+        "task_brief": result.get("task_brief"),
+        "prompt_plan": final_output.get("prompt_plan") or final_output.get("prompt"),
+        "component_specs": final_output.get("component_specs"),
+        "evaluation": final_output.get("evaluation"),
+        "psd_status": "实验项，当前未生成 PSD 分层文件。",
+    }
+    provenance_dir = Path(result.get("workspace_dir") or get_session_workspace_dir()) / "final_outputs"
+    provenance_path = provenance_dir / f"{sanitize_filename(Path(final_path).stem)}_provenance.json"
+    write_json(provenance_path, provenance)
+    st.download_button(
+        "下载生产记录 JSON",
+        provenance_path.read_text(encoding="utf-8"),
+        file_name=provenance_path.name,
+        mime="application/json",
+        key="final_download_provenance",
+        use_container_width=False,
+    )
+    st.caption("PSD 分层文件：实验项，当前版本暂不输出。高清化可继续使用下方 HD Redraw。")
 
 
 def render_labeling_page(modules: dict[str, Any]) -> None:

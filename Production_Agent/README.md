@@ -1,20 +1,24 @@
 # Production_Agent_2.0
 
-这是一个重新实现的总控生产 Agent，用 LangGraph 编排“背景优先”生成流程，并直接消费 `Production_Agent_2.0` 下的素材目录。
+这是南孚图片生产 Agent 的“工作一 / 模式一：稳妥生产模式”实现。当前主链路由 Streamlit interface 编排，将 Production Agent 的背景生成能力、Evaluation Agent 的 checklist 审核能力、Edit Loop、组件成图和最终输出连成一个可操作闭环。
 
-素材分两类：
+当前支持：
 
-- **成品风格参考**：放在 `resources/Background` 或 `sources/Background`（至少一张成品主图/海报，用于生成纯背景）。
-- **后期组件素材库**：`sources` 下除 `Background` / `Layout` / `Object` / `Text` 外的子目录（如电池体、电商彩盒等），会在 `placement_plan.json` 的 `component_library` 中列出路径。
+- 背景生成/提取：支持“图片提取背景”和“文字生成背景”。
+- 自动评估：背景图生成后、Edit 后、组件成图后都会自动调用 Evaluation Agent。
+- 背景 Edit：用户选择候选图作为 Base，填写需要修改/保持不变的内容，生成新候选。
+- 组件成图：用户上传电池、包装、Logo、卖点文案、人物等组件，生成最终商业图。
+- 二次评估：组件成图后重点检查品牌元素、文字、遮挡、商业可用性等问题。
+- 最终输出：支持 PNG 原图、JPG 压缩版、生产记录 JSON，并可继续使用 HD Redraw 高清化。
 
-流程分为 4 步：
+暂未完整支持：
 
-1. 扫描 `Background` 中的成品参考图并生成 `asset_manifest.json`
-2. 将参考图整合为拼板并生成 `creative_brief` 与 `prompt_plan`
-3. 调用 Qwen 仅生成背景候选图（`candidate_*.png`）
-4. 输出 `placement_plan.json`（含组件库索引）+ `placement_preview.png`，并写出最终状态
+- PSD 分层输出。
+- 完整南孚组件素材库选择页。
+- 模式二“创意实验模式”。
+- 模式三“本土化 + 翻译”。
 
-命令行直接跑时，请确保 `sources/Background`（或 `resources/Background`）里至少有一张成品参考图；否则请用 Streamlit 界面上传。
+命令行仍可直接运行底层背景生成流程；完整模式一闭环请使用 `interface/app.py`。
 
 ## 安装
 
@@ -66,4 +70,10 @@ Production_Agent_2.0/runs/<run_id>/
 
 ## 当前模型
 
-当前默认使用 `qwen-image-2.0-pro`。本项目通过先合成 Background 参考板的方式把背景语义纳入模型上下文，只生成背景底图并输出摆放建议。
+当前默认使用：
+
+- 背景生成：`qwen-image-2.0-pro`
+- 图片编辑/背景提取/组件成图：`qwen-image-edit-max`
+- 自动评估：`qwen3-omni-flash`
+
+若首选模型限流或繁忙，interface 会按模型族配置自动降级。

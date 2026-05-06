@@ -21,6 +21,7 @@ class RunRequest(BaseModel):
     use_case: UseCase = "main_detail"
     audience: str = "电商消费者"
     scene: str = ""
+    key_appliances: list[str] = Field(default_factory=list)
     style: str = ""
     must_have: list[str] = Field(default_factory=list)
     must_avoid: list[str] = Field(default_factory=list)
@@ -40,6 +41,7 @@ class RunRequest(BaseModel):
     variants_per_direction: int = 2
     variants: int = 2
     background_prompt: str = ""
+    target_market: str = ""
     dry_run: bool = False
 
     @model_validator(mode="after")
@@ -82,6 +84,7 @@ class TaskBrief(BaseModel):
     workflow_type: str
     audience: str
     scene: str
+    key_appliances: list[str] = Field(default_factory=list)
     style: str = ""
     must_have: list[str] = Field(default_factory=list)
     must_avoid: list[str] = Field(default_factory=list)
@@ -97,6 +100,7 @@ class TaskBrief(BaseModel):
     variants_per_direction: int = 2
     source_summary: str = ""
     prompt_context: str = ""
+    target_market: str = ""
     hard_constraints: list[str] = Field(default_factory=list)
     quality_constraints: list[str] = Field(default_factory=list)
     negative_constraints: list[str] = Field(default_factory=list)
